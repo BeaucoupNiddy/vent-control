@@ -45,6 +45,22 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_events_ts ON events(ts);
     """,
+    # 2: Phase 2-4 columns: per-group state, conditioned-air tracking, dehumidifier monitoring, weather cache
+    """
+    ALTER TABLE history ADD COLUMN penalty_w REAL;          -- modeled HVAC power to replace lost conditioned air
+    ALTER TABLE history ADD COLUMN cond_air_cfm REAL;       -- modeled conditioned air drawn from upstairs
+    ALTER TABLE history ADD COLUMN dehum_power_w REAL;      -- measured dehumidifier plug power
+    ALTER TABLE history ADD COLUMN dehum_on INTEGER;
+    ALTER TABLE history ADD COLUMN groups TEXT;             -- JSON {group: {on, reason_code}}
+    CREATE TABLE weather_cache (
+        source TEXT NOT NULL,              -- e.g. noaa-global-hourly
+        station TEXT NOT NULL,
+        ts TEXT NOT NULL,                  -- UTC hour
+        temp_c REAL,
+        dewpoint_c REAL,
+        PRIMARY KEY (source, station, ts)
+    );
+    """,
 ]
 
 
@@ -112,6 +128,7 @@ class Storage:
         out = [dict(r) for r in rows]
         for r in out:
             r["zones"] = json.loads(r["zones"]) if r["zones"] else {}
+            r["groups"] = json.loads(r["groups"]) if r.get("groups") else {}
         if len(out) > max_points:
             stride = len(out) / max_points
             out = [out[int(i * stride)] for i in range(max_points)]
@@ -148,6 +165,26 @@ class Storage:
         for r in out:
             r["details"] = json.loads(r["details"]) if r["details"] else None
         return out
+
+    # ---------------------------------------------------------------- weather cache
+    def cache_weather(self, source: str, station: str, rows: list[tuple[datetime, float | None, float | None]]) -> int:
+        with self._lock:
+            self.db.executemany(
+                "INSERT OR REPLACE INTO weather_cache (source, station, ts, temp_c, dewpoint_c) VALUES (?,?,?,?,?)",
+                [(source, station, _iso(t), tc, td) for t, tc, td in rows])
+            self.db.commit()
+        return len(rows)
+
+    def cached_weather(self, source: str, station: str, start: datetime, end: datetime) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT ts, temp_c, dewpoint_c FROM weather_cache WHERE source=? AND station=? AND ts>=? AND ts<? ORDER BY ts",
+            (source, station, _iso(start), _iso(end))).fetchall()
+        return [dict(r) for r in rows]
+
+    def weather_coverage(self) -> list[dict]:
+        rows = self.db.execute("SELECT source, station, MIN(ts) AS first, MAX(ts) AS last, COUNT(*) AS hours "
+                               "FROM weather_cache GROUP BY source, station").fetchall()
+        return [dict(r) for r in rows]
 
     def prune(self, now: datetime, retention_days: int) -> None:
         cutoff = _iso(now - timedelta(days=retention_days))

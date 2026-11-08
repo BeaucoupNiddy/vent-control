@@ -1,0 +1,16 @@
+{
+  "_note": "Representative sample of a GW1200 /get_livedata_info response. NOT captured from the user's gateway; replace with a real capture (python -m ventctl.tools.capture_ecowitt).",
+  "common_list": [
+    {"id": "0x02", "val": "84.2", "unit": "F"},
+    {"id": "0x07", "val": "71%"},
+    {"id": "0x03", "val": "73.6", "unit": "F"},
+    {"id": "3", "val": "84.2", "unit": "F"}
+  ],
+  "wh25": [{"intemp": "75.9", "unit": "F", "inhumi": "58%", "abs": "29.88 inHg", "rel": "29.92 inHg"}],
+  "ch_aisle": [
+    {"channel": "1", "name": "", "battery": "0", "temp": "79.3", "unit": "F", "humidity": "83%"},
+    {"channel": "2", "name": "", "battery": "1", "temp": "78.1", "unit": "F", "humidity": "86%"},
+    {"channel": "3", "name": "", "battery": "0", "temp": "--", "unit": "F", "humidity": "--"}
+  ],
+  "ch_temp": [{"channel": "1", "name": "", "temp": "75.2", "unit": "F", "battery": "1.48V"}]
+}

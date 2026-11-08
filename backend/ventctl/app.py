@@ -7,21 +7,26 @@ import csv
 import io
 import logging
 import os
+import urllib.parse
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from . import analysis, climate, simulation
 from .clock import AcceleratedClock, Clock, ManualClock
-from .config import AppConfig, Mode, example_config
+from .config import AppConfig, Mode, ShellyDevice, example_config
 from .controller import Controller
-from .hardware.mock import MockSensors, MockSwitches, MockWorld
+from .hardware import factory
+from .hardware.base import HardwareError
+from .hardware.ecowitt import EcowittSource
+from .hardware.mock import MockWorld
+from .hardware.shelly import ShellySwitches
 from .psychro import AirState
 from .units import f_to_c
 
@@ -71,6 +76,12 @@ class FaultRequest(BaseModel):
     fault: str | None = None  # sensor: "offline" | None ; switch: "unreachable" | "stuck" | None ; gateway: "down" | None
 
 
+class SwitchTestRequest(BaseModel):
+    host: str
+    channel: int = 0
+    generation: str = "auto"
+
+
 class CalcRequest(BaseModel):
     t_f: float
     rh_pct: float
@@ -102,19 +113,19 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             cfg = example_config()
             storage.save_config(cfg)
         now = datetime.now(timezone.utc)
-        if cfg.sensors.provider != "mock" or cfg.switches.provider != "mock":
-            log.warning("Real hardware adapters are Phase 2; falling back to mock hardware")
+        mock = cfg.sensors.provider == "mock" and cfg.switches.provider == "mock"
         empty = storage.history_count() == 0
-        start = now - timedelta(hours=backfill_hours) if (empty and backfill_hours > 0) else now
+        # mock history backfill only when everything is mock: never mix invented data with real history
+        start = now - timedelta(hours=backfill_hours) if (mock and empty and backfill_hours > 0) else now
         bclock = ManualClock(start)
         clock = ProxyClock(bclock)
-        world = MockWorld(cfg, start, tz=cfg.system.timezone)
-        ctrl = Controller(cfg, storage, MockSensors(world, clock), MockSwitches(world, clock), clock, data_source="mock")
+        sensors, switches, world = factory.build(cfg, clock, None, start)
+        ctrl = Controller(cfg, storage, sensors, switches, clock, data_source=factory.data_source(cfg))
         await ctrl.startup()
         if start < now:
             log.info("Backfilling %.0f h of mock history", backfill_hours)
             await backfill(ctrl, bclock, now)
-        clock.inner = AcceleratedClock(now, demo_speed) if demo_speed != 1 else Clock()
+        clock.inner = AcceleratedClock(now, demo_speed) if (demo_speed != 1 and mock) else Clock()
         state.update(storage=storage, ctrl=ctrl, world=world, clock=clock)
         task = asyncio.create_task(ctrl.run_forever()) if start_loop else None
         yield
@@ -152,9 +163,62 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             new = AppConfig.model_validate(body)
         except ValidationError as e:
             return JSONResponse(status_code=422, content={"detail": e.errors(include_url=False, include_context=False)})
-        ctrl().apply_config(new)
-        state["world"].config = new
+        c = ctrl()
+        old = c.config
+        hw_keys = ("sensors", "switches", "homeassistant")
+        hw_changed = any(getattr(old, k).model_dump(exclude={"mappings"}) != getattr(new, k).model_dump(exclude={"mappings"})
+                         for k in hw_keys)
+        c.apply_config(new)
+        if hw_changed:
+            sensors, switches, world = factory.build(new, c.clock, state.get("world"), c.clock.now())
+            c.sensors, c.switches = sensors, switches
+            c.data_source = factory.data_source(new)
+            c._armed.clear()
+            state["world"] = world
+            c.storage.add_event(c.clock.now(), "config", "warning",
+                                f"Hardware adapters changed: sensors={new.sensors.provider}, switches={new.switches.provider}",
+                                "HARDWARE_CHANGE")
+        if state.get("world"):
+            state["world"].config = new
         return new.model_dump(mode="json")
+
+    @app.get("/api/sensors/discover")
+    async def discover():
+        try:
+            return {"channels": await ctrl().sensors.discover(),
+                    "mapped": [m.sensor_id for m in ctrl().config.sensors.mappings]}
+        except HardwareError as e:
+            raise HTTPException(502, str(e))
+
+    @app.get("/api/sensors/raw")
+    def sensors_raw():
+        """Last raw gateway response, for checking the format against the parser."""
+        return {"raw": getattr(ctrl().sensors, "last_raw", None),
+                "poll_error": getattr(ctrl().sensors, "last_poll_error", None)}
+
+    @app.post("/data/report")
+    @app.post("/data/report/")
+    async def ecowitt_push(request: Request):
+        src = ctrl().sensors
+        if not isinstance(src, EcowittSource) or not ctrl().config.sensors.ecowitt_push:
+            raise HTTPException(404, "Ecowitt push is not enabled")
+        body = (await request.body()).decode("utf-8", "replace")
+        form = {k: v[-1] for k, v in urllib.parse.parse_qs(body).items()}
+        readings = src.ingest_push(form)
+        return {"accepted": len(readings)}
+
+    @app.post("/api/switches/test")
+    async def switch_test(req: SwitchTestRequest):
+        """Read a Shelly plug's identity and relay state without switching it."""
+        dev = ShellyDevice(switch_id="_test", host=req.host, channel=req.channel, generation=req.generation)
+        sw = ShellySwitches([dev], ctrl().clock, ctrl().config.switches.timeout_s)
+        try:
+            info = await sw.device_info(req.host)
+        except HardwareError as e:
+            raise HTTPException(502, str(e))
+        st = await sw.get("_test")
+        return {"info": info, "status": {"on": st.on, "reachable": st.reachable, "power_w": st.power_w,
+                                         "error": st.error}}
 
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):
@@ -237,14 +301,18 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
 
     @app.get("/api/mock/state")
     def mock_state():
-        w: MockWorld = state["world"]
+        w: MockWorld | None = state.get("world")
+        if w is None:
+            raise HTTPException(404, "mock hardware is not active")
         return {"sensor_faults": sorted(w.sensor_faults), "switch_faults": w.switch_faults,
                 "gateway_down": w.gateway_down, "switches": w.switch_on,
                 "profile": w.profile.summary(), "profile_hour": w.profile_hour(ctrl().clock.now())}
 
     @app.post("/api/mock/fault")
     def mock_fault(req: FaultRequest):
-        w: MockWorld = state["world"]
+        w: MockWorld | None = state.get("world")
+        if w is None:
+            raise HTTPException(404, "mock hardware is not active")
         if req.target == "sensor" and req.id:
             (w.sensor_faults.add if req.fault else w.sensor_faults.discard)(req.id)
         elif req.target == "switch" and req.id:

@@ -137,14 +137,37 @@ class Dehumidifier(BaseModel):
     setpoint_rh_pct: float = Field(50, ge=30, le=80)
     rated_w: float = Field(500, ge=0)
     removal_pints_per_day: float = Field(35, ge=0, description="Estimated real removal at basement conditions")
+    monitor_switch_id: str = Field("", description="Power-metering plug feeding the dehumidifier (monitored, never switched)")
+    running_threshold_w: float = Field(60, ge=0, description="Above this power draw the compressor is considered running")
+    require_ventilation_beats_dehumidifier: bool = Field(
+        False, description="Energy Saver: run fans only when ventilation is cheaper per gallon than the dehumidifier")
+
+
+class HomeAssistantSettings(BaseModel):
+    url: str = Field("", description="e.g. http://homeassistant.local:8123")
+    token: str = Field("", description="Long-lived access token (stored only in the local database)")
+    sensor_entities: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description="sensor_id -> {temp: entity_id, rh: entity_id, pressure_pa: entity_id}",
+    )
 
 
 class SensorSettings(BaseModel):
     provider: Literal["mock", "ecowitt", "homeassistant"] = "mock"
-    ecowitt_host: str = ""
+    ecowitt_host: str = Field("", description="Gateway IP or host[:port] for local polling")
+    ecowitt_push: bool = Field(True, description="Also accept the gateway's 'Customized' upload (Ecowitt protocol)")
     poll_seconds: float = Field(60, ge=5, le=3600)
     stale_minutes: float = Field(5, ge=1, le=120)
     mappings: list[SensorMapping] = Field(default_factory=list)
+
+
+class ShellyDevice(BaseModel):
+    switch_id: str = Field(..., description="Id used by fans (Fan.switch_id)")
+    host: str = Field(..., description="Plug IP or hostname")
+    channel: int = Field(0, ge=0, le=3)
+    generation: Literal["auto", "1", "2"] = "auto"
+    username: str = ""
+    password: str = ""
 
 
 class SwitchSettings(BaseModel):
@@ -152,8 +175,11 @@ class SwitchSettings(BaseModel):
     verify_after_command: bool = True
     startup_state: Literal["off"] = "off"
     hardware_max_on_minutes: float | None = Field(
-        None, description="Configured on the plug itself (auto-off timer). Informational until Phase 2."
-    )
+        30, ge=2, le=24 * 60,
+        description="Dead-man timer: every ON command arms the plug's own auto-off. The controller re-arms it while "
+                    "the fans should stay on, so if this computer stops the plug turns itself off.")
+    shelly_devices: list[ShellyDevice] = Field(default_factory=list)
+    timeout_s: float = Field(4, ge=0.5, le=30)
 
 
 class SystemSettings(BaseModel):
@@ -173,6 +199,7 @@ class AppConfig(BaseModel):
     groups: list[FanGroup] = Field(default_factory=lambda: [FanGroup(id="main", name="Basement")])
     dehumidifier: Dehumidifier = Field(default_factory=Dehumidifier)
     sensors: SensorSettings = Field(default_factory=SensorSettings)
+    homeassistant: HomeAssistantSettings = Field(default_factory=HomeAssistantSettings)
     switches: SwitchSettings = Field(default_factory=SwitchSettings)
     system: SystemSettings = Field(default_factory=SystemSettings)
 

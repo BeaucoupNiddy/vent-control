@@ -64,13 +64,24 @@ class Decision:
         return d
 
 
+def dehumidifier_efficiency(config: AppConfig) -> float:
+    """Configured dehumidifier water removal per kWh [g/kWh]."""
+    dh = config.dehumidifier
+    g_h = dh.removal_pints_per_day * 473.176473 / 24
+    return g_h / (dh.rated_w / 1000) if dh.rated_w > 0 else 0.0
+
+
 def profile_thresholds(config: AppConfig) -> tuple[float, float]:
     """(min removal g/h, min efficiency g/kWh) for the selected energy profile."""
     c = config.control
     if c.energy_profile == EnergyProfile.MAX_DRYING:
         return c.min_removal_g_per_h * 0.4, 0.0
     if c.energy_profile == EnergyProfile.ENERGY_SAVER:
-        return c.min_removal_g_per_h * 2.0, c.min_efficiency_g_per_kwh_saver
+        eff = c.min_efficiency_g_per_kwh_saver
+        dh = config.dehumidifier
+        if dh.enabled and dh.require_ventilation_beats_dehumidifier and dh.rated_w > 0:
+            eff = max(eff, dehumidifier_efficiency(config))
+        return c.min_removal_g_per_h * 2.0, eff
     return c.min_removal_g_per_h, c.min_efficiency_g_per_kwh_balanced
 
 

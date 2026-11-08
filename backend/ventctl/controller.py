@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .clock import Clock
-from .config import AppConfig, Mode, SensorRole
+from .config import AppConfig, FanGroup, Mode, SensorRole
 from .engine import Decision, GroupState, decide, group_fans
 from .hardware.base import HardwareError, SensorSource, SwitchController, SwitchStatus
 from .sensors import SensorReading, Snapshot, conditions_for_group, validate
@@ -82,7 +82,9 @@ class Controller:
     _gateway_error: str | None = None
     _rh_above: dict[str, datetime | None] = field(default_factory=dict)
     _cycle_times: list[datetime] = field(default_factory=list)
-    _command_failures: dict[str, str] = field(default_factory=dict)
+    _command_failures: dict[str, tuple] = field(default_factory=dict)
+    _armed: dict[str, datetime] = field(default_factory=dict)  # last hardware auto-off arm per switch
+    dehum_status: SwitchStatus | None = None
     _started: bool = False
     _task: asyncio.Task | None = None
 
@@ -175,6 +177,8 @@ class Controller:
                                                        "metrics": d.metrics,
                                                        "switches": {s: i.to_dict() for s, i in self.switch_info.items()}})
 
+        await self._rearm_watchdogs(now)
+        await self._read_dehumidifier()
         self._update_alerts(now)
         if self.last_history is None or (now - self.last_history) >= timedelta(minutes=cfg.system.history_minutes):
             self._write_history(now)
@@ -204,6 +208,8 @@ class Controller:
                        "confirmed_state": res.on, "reachable": res.reachable, "error": res.error,
                        "reason_code": d.reason_code}
             if ok:
+                if d.target_on:
+                    self._armed[f.switch_id] = now
                 if failed is None or failed[2] == d.target_on:
                     self._command_failures.pop(f.switch_id, None)
                 self.storage.add_event(now, "command", "info",
@@ -223,6 +229,37 @@ class Controller:
             if on:
                 self._cycle_times.append(now)
         gs.is_on, gs.verified = on, verified
+
+    async def _rearm_watchdogs(self, now: datetime) -> None:
+        """Keep the plugs' hardware auto-off timers from expiring while fans should run.
+
+        If this process stops, nobody re-arms them and the plugs switch off on their own.
+        """
+        minutes = self.config.switches.hardware_max_on_minutes
+        rearm = getattr(self.switches, "rearm", None)
+        if not minutes or rearm is None or self.config.mode == Mode.SIMULATION:
+            return
+        for f in self.config.fans:
+            info = self.switch_info.get(f.switch_id)
+            if not (f.enabled and info and info.reachable and info.confirmed and info.commanded):
+                continue
+            last = self._armed.get(f.switch_id)
+            if last is None or (now - last) >= timedelta(minutes=minutes / 3):
+                await rearm(f.switch_id)
+                self._armed[f.switch_id] = now
+
+    async def _read_dehumidifier(self) -> None:
+        dh = self.config.dehumidifier
+        if dh.enabled and dh.monitor_switch_id:
+            self.dehum_status = await self.switches.get(dh.monitor_switch_id)  # read only, never switched
+        else:
+            self.dehum_status = None
+
+    def dehumidifier_running(self) -> bool | None:
+        st = self.dehum_status
+        if st is None or not st.reachable or st.power_w is None:
+            return None
+        return st.power_w >= self.config.dehumidifier.running_threshold_w
 
     # ------------------------------------------------------------ helpers
     def _switch_ids(self) -> list[str]:
@@ -377,6 +414,17 @@ class Controller:
             self._set_alert(now, f"CONDENSATION_UNVERIFIED:{gid}", d.reason_code.endswith("CONDENSATION_UNVERIFIED"),
                             "warning", "Automatic ventilation is blocked until a surface sensor or a conservative "
                             "minimum surface temperature is configured (Settings > Environmental).")
+        for f in cfg.fans:
+            self._set_alert(now, f"MOTOR_LOAD:{f.id}", f.enabled and not f.motor_load_ok, "warning",
+                            f"{f.name}: smart switch is not confirmed as rated for this motor load.")
+        dh = cfg.dehumidifier
+        if dh.enabled and dh.monitor_switch_id:
+            st = self.dehum_status
+            self._set_alert(now, "DEHUMIDIFIER_OFFLINE", st is not None and not st.reachable, "warning",
+                            f"Dehumidifier plug {dh.monitor_switch_id} is not responding")
+        poll_err = getattr(self.sensors, "last_poll_error", None)
+        self._set_alert(now, "ECOWITT_POLL", bool(poll_err) and not self._gateway_error, "warning",
+                        f"Ecowitt polling failed ({poll_err}); using pushed data only")
         self._cycle_times = [t for t in self._cycle_times if now - t <= timedelta(hours=1)]
         self._set_alert(now, "EXCESSIVE_SWITCHING", len(self._cycle_times) > cfg.control.max_cycles_per_hour_alert,
                         "warning", f"{len(self._cycle_times)} fan starts in the last hour")
@@ -389,48 +437,68 @@ class Controller:
 
     # ------------------------------------------------------------ history
     def _write_history(self, now: datetime) -> None:
-        if not self.config.groups:
+        cfg = self.config
+        if not cfg.groups or not self.snapshot or not self.decisions:
             return
-        gid = self.config.groups[0].id
-        d = self.decisions.get(gid)
-        if d is None:
-            return
-        m = d.metrics
-        ind, out = m.get("indoor"), m.get("outdoor")
+        # basement conditions across all zones, regardless of fan grouping
+        allc = conditions_for_group(self.snapshot, FanGroup(id="_all", name="all"), cfg)
+        first = self.decisions.get(cfg.groups[0].id)
+        ind = allc.indoor.to_dict() if allc.indoor else None
+        out = allc.outdoor.to_dict() if allc.outdoor else None
+        sim = cfg.mode == Mode.SIMULATION
         on_count = 0
         power = 0.0
         all_verified = True
-        for f in self.config.fans:
-            info = self.switch_info.get(f.switch_id)
-            if self.config.mode == Mode.SIMULATION:
-                if self.groups.get(f.group, GroupState()).is_on and f.enabled:
-                    on_count += 1
+        for f in cfg.fans:
+            if not f.enabled:
                 continue
-            if info and info.confirmed and f.enabled:
+            info = self.switch_info.get(f.switch_id)
+            if sim:
+                on_count += 1 if self.groups.get(f.group, GroupState()).is_on else 0
+                continue
+            if info and info.confirmed:
                 on_count += 1
             if info and info.power_w:
                 power += info.power_w
             if not (info and info.reachable):
                 all_verified = False
-        pot = d.effect.net_removal_g_h if d.effect else None
+        removal = potential = penalty = cond_cfm = 0.0
+        have_potential = False
+        groups = {}
+        for g in cfg.groups:
+            d = self.decisions.get(g.id)
+            gs = self.groups.get(g.id, GroupState())
+            if d is None:
+                continue
+            groups[g.id] = {"on": gs.is_on, "reason_code": d.reason_code}
+            if d.effect:
+                have_potential = True
+                potential += d.effect.net_removal_g_h
+                if gs.is_on:
+                    removal += d.effect.net_removal_g_h
+                    penalty += d.effect.conditioned_air_penalty_w
+                    cond_cfm += d.effect.upstairs_path_cfm
         zones = {}
-        if self.snapshot:
-            for r in self.snapshot.readings:
-                if r.mapping.role == SensorRole.BASEMENT and r.ok:
-                    zones[r.mapping.zone or r.mapping.sensor_id] = {"t_c": r.temp_c, "rh": r.rh}
-        is_on = on_count > 0
+        for r in self.snapshot.readings:
+            if r.mapping.role == SensorRole.BASEMENT and r.ok:
+                zones[r.mapping.zone or r.mapping.sensor_id] = {"t_c": r.temp_c, "rh": r.rh}
+        dh = self.dehum_status
         self.storage.add_history(now, {
             "source": self.data_source,
             "indoor_t_c": ind["t_c"] if ind else None, "indoor_rh": ind["rh_pct"] if ind else None,
             "indoor_td_c": ind["dew_point_c"] if ind else None, "indoor_w": ind["w"] if ind else None,
             "outdoor_t_c": out["t_c"] if out else None, "outdoor_rh": out["rh_pct"] if out else None,
             "outdoor_td_c": out["dew_point_c"] if out else None, "outdoor_w": out["w"] if out else None,
-            "surface_t_c": m.get("surface_c"), "surface_source": m.get("surface_source"),
+            "surface_t_c": allc.surface_c, "surface_source": allc.surface_source,
             "fans_on": on_count, "fans_verified": 1 if all_verified else 0,
-            "power_w": power if self.config.mode != Mode.SIMULATION else 0.0,
-            "removal_g_h": pot if (is_on and pot is not None) else 0.0,
-            "potential_removal_g_h": pot,
-            "mode": self.config.mode.value, "reason_code": d.reason_code, "zones": zones,
+            "power_w": 0.0 if sim else power,
+            "removal_g_h": removal,
+            "potential_removal_g_h": potential if have_potential else None,
+            "mode": cfg.mode.value, "reason_code": first.reason_code if first else None, "zones": zones,
+            "penalty_w": penalty, "cond_air_cfm": cond_cfm,
+            "dehum_power_w": dh.power_w if dh and dh.reachable else None,
+            "dehum_on": None if self.dehumidifier_running() is None else int(bool(self.dehumidifier_running())),
+            "groups": groups,
         })
 
     # ------------------------------------------------------------ status
@@ -462,4 +530,19 @@ class Controller:
             "sensors": self.snapshot.to_dict()["readings"] if self.snapshot else [],
             "alerts": [a.to_dict() for a in sorted(self.alerts.values(), key=lambda a: a.since, reverse=True)],
             "clock_speed": self.clock.speed,
+            "hardware": {
+                "sensor_provider": self.config.sensors.provider,
+                "switch_provider": self.config.switches.provider,
+                "hardware_auto_off_minutes": self.config.switches.hardware_max_on_minutes
+                if self.switches.supports_hardware_auto_off() else None,
+                "gateway_error": self._gateway_error,
+                "switches": {s: i.to_dict() for s, i in self.switch_info.items()},
+            },
+            "dehumidifier": None if not self.config.dehumidifier.enabled else {
+                "name": self.config.dehumidifier.name,
+                "power_w": self.dehum_status.power_w if self.dehum_status else None,
+                "reachable": self.dehum_status.reachable if self.dehum_status else None,
+                "running": self.dehumidifier_running(),
+                "monitored": bool(self.config.dehumidifier.monitor_switch_id),
+            },
         }
