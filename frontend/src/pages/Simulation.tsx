@@ -8,7 +8,7 @@ const COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--
 type FieldDef = [key: string, label: string, hint?: string, step?: number];
 const FIELDS: { title: string; fields: FieldDef[] }[] = [
   { title: "Basement", fields: [
-    ["floor_area_ft2", "Floor area (ft²)"], ["ceiling_ft", "Ceiling height (ft)", "", 0.5],
+    ["volume_ft3", "Basement air volume (ft³)", "", 100],
     ["initial_temp_f", "Initial temp (°F)"], ["initial_rh_pct", "Initial RH (%)"],
     ["basement_mean_temp_f", "Mean temp (°F)", "blank = profile default"], ["temp_variation_f", "Daily temp swing ± (°F)", "", 0.5],
     ["surface_temp_f", "Coldest surface (°F)", "blank = profile default", 0.5],

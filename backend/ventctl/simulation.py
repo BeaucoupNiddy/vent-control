@@ -38,14 +38,13 @@ from .engine import GroupState, decide
 from .psychro import AirState
 from .sensors import Conditions
 from .units import (
-    FT2_TO_M2, FT_TO_M, M3_PER_FT3, c_to_f, cfm_to_m3s, delta_f_to_c, f_to_c, grams_to_gallons,
+    M3_PER_FT3, c_to_f, cfm_to_m3s, delta_f_to_c, f_to_c, grams_to_gallons,
     pints_per_day_to_g_per_h,
 )
 
 
 class SimParams(BaseModel):
-    floor_area_ft2: float = Field(1000, gt=10, le=20000)
-    ceiling_ft: float = Field(7, gt=3, le=20)
+    volume_ft3: float = Field(24000, gt=100, le=500000, description="Basement air volume")
     initial_temp_f: float = 79
     initial_rh_pct: float = Field(75, ge=5, le=100)
     basement_mean_temp_f: float | None = Field(None, description="Defaults to the profile's suggestion")
@@ -53,8 +52,8 @@ class SimParams(BaseModel):
     thermal_tau_h: float = Field(6, gt=0.1)
     thermal_mass_factor: float = Field(30, ge=1, description="Effective heat capacity as a multiple of the air's")
     fan_count: int = Field(2, ge=0, le=20)
-    fan_cfm: float = Field(85, gt=0, le=5000, description="Actual airflow per fan")
-    fan_w: float = Field(28, ge=0)
+    fan_cfm: float = Field(110, gt=0, le=5000, description="Actual airflow per fan")
+    fan_w: float = Field(20, ge=0)
     fan_type: FanType = FanType.EXHAUST
     balanced: bool = Field(False, description="Add one matching intake fan per exhaust fan")
     moisture_source_pints_day: float = Field(6, ge=0, le=500)
@@ -102,7 +101,7 @@ class BasementModel:
         self.fans = fans
         self.house = house
         self.upstairs = upstairs
-        vol = params.floor_area_ft2 * FT2_TO_M2 * params.ceiling_ft * FT_TO_M
+        vol = params.volume_ft3 * M3_PER_FT3
         self.volume_m3 = vol
         self.t_c = f_to_c(params.initial_temp_f)
         self.w = psychro.humidity_ratio(self.t_c, params.initial_rh_pct / 100)

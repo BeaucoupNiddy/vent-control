@@ -21,7 +21,7 @@ from datetime import datetime
 
 from . import psychro
 from .config import AppConfig, FanType
-from .units import FT2_TO_M2, FT_TO_M, cfm_to_m3s, grams_to_gallons
+from .units import M3_PER_FT3, cfm_to_m3s, grams_to_gallons
 
 BLOCK_MIN = 30
 
@@ -78,7 +78,7 @@ def blocks(rows: list[dict]) -> list[dict]:
 
 def calibrate(rows: list[dict], config: AppConfig) -> dict:
     h = config.house
-    vol = h.basement_floor_ft2 * FT2_TO_M2 * h.basement_ceiling_ft * FT_TO_M
+    vol = h.basement_volume_ft3 * M3_PER_FT3
     fans = [f for f in config.fans if f.enabled]
     exhaust = sum(f.actual_cfm for f in fans if f.type == FanType.EXHAUST)
     intake = sum(f.actual_cfm for f in fans if f.type == FanType.INTAKE)

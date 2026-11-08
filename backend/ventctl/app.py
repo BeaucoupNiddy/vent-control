@@ -281,7 +281,8 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         c = ctrl().config
         p = simulation.SimParams(conditioned_air_fraction=c.house.conditioned_air_fraction,
                                  electricity_cost_per_kwh=c.house.electricity_cost_per_kwh,
-                                 natural_ach=c.house.natural_ach)
+                                 natural_ach=c.house.natural_ach,
+                                 volume_ft3=c.house.basement_volume_ft3)
         fans = [f for f in c.fans if f.enabled]
         if fans:
             p.fan_count = len(fans)

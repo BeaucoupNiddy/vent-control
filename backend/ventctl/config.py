@@ -129,8 +129,7 @@ class HouseSettings(BaseModel):
     heating_cop: float = Field(1.0, gt=0.5, le=6, description="1.0 = resistance / gas-equivalent; 3 = heat pump")
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
     natural_ach: float = Field(0.3, ge=0, le=10, description="Natural air changes per hour (simulation)")
-    basement_floor_ft2: float = Field(1000, gt=10, le=20000)
-    basement_ceiling_ft: float = Field(7, gt=3, le=20)
+    basement_volume_ft3: float = Field(24000, gt=100, le=500000, description="Air volume of the basement")
 
 
 class Dehumidifier(BaseModel):
@@ -234,10 +233,10 @@ def example_config() -> AppConfig:
     """Default configuration for a fresh install in mock/simulation mode."""
     return AppConfig(
         fans=[
-            Fan(id="exhaust_1", name="Exhaust fan (east wall)", type=FanType.EXHAUST, rated_cfm=110,
-                actual_cfm=85, rated_w=28, switch_id="mock-plug-1"),
-            Fan(id="exhaust_2", name="Exhaust fan (north wall)", type=FanType.EXHAUST, rated_cfm=110,
-                actual_cfm=85, rated_w=28, switch_id="mock-plug-2"),
+            # Tjernlund V2D UnderAire: two 110 CFM fans in one housing on one cord, about 40 W together.
+            # It mounts in a foundation vent with no ducting, so installed airflow is taken as the rating.
+            Fan(id="v2d", name="Tjernlund V2D UnderAire (2 × 110 CFM)", type=FanType.EXHAUST, rated_cfm=220,
+                actual_cfm=220, rated_w=40, switch_id="mock-plug-1"),
         ],
         control=ControlSettings(surface_temp_estimate_f=None),
         sensors=SensorSettings(

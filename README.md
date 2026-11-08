@@ -174,6 +174,7 @@ Fits natural air changes and effective fan CFM to how basement humidity actually
 - **Sensors:** place all the WN31s together for a few hours, then enter temperature and RH offsets per sensor (Settings, Sensors).
 - **Surface temperature:** without a surface probe, measure the coldest slab or wall spot with an IR thermometer in the warmest, most humid week. Enter a value a few °F *below* that as the conservative estimate. Auto mode stays off until you do this or add a probe.
 - **Fan airflow:** rated CFM overstates installed airflow, often by 20–40 % with ducting and grilles. Enter your best estimate as "actual CFM".
+- **Defaults for this house:** one Tjernlund V2D UnderAire (two 110 CFM fans, 220 CFM and about 40 W total, on one plug) exhausting a 24,000 ft³ basement. That is about 0.55 air changes per hour from the fan. The V2D sits in a vent opening with no ducting, so the default takes the full 220 CFM as installed airflow. The calibration on the Reports page can check that once a few weeks of data exist.
 - **Upstairs fraction:** start with 10–25 % for an old tongue-and-groove floor. A differential-pressure sensor can replace the guess.
 
 ## Safety limitations

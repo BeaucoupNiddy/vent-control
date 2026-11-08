@@ -47,8 +47,7 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "house.cooling_cop", label: "AC efficiency (COP)", step: 0.1 },
     { path: "house.heating_cop", label: "Heating efficiency (COP)", step: 0.1 },
     { path: "house.natural_ach", label: "Natural leakage (ACH)", step: 0.1 },
-    { path: "house.basement_floor_ft2", label: "Basement floor area (ft²)" },
-    { path: "house.basement_ceiling_ft", label: "Basement ceiling height (ft)", step: 0.5 },
+    { path: "house.basement_volume_ft3", label: "Basement air volume (ft³)", step: 100 },
   ] },
   { title: "Safety interlocks", note: "Fan control must never override required combustion air, flood openings or legally required ventilation. Have naturally vented gas appliances checked for backdrafting before running exhaust-only ventilation unattended.", fields: [
     { path: "control.water_intrusion_lockout", label: "Water-intrusion lockout active", type: "bool" },

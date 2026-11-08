@@ -27,7 +27,8 @@ class MockWorld:
         self.tz = ZoneInfo(tz)
         self.rng = random.Random(seed)
         params = SimParams(initial_temp_f=79, initial_rh_pct=72, moisture_source_pints_day=6,
-                           surface_temp_f=75.5, conditioned_air_fraction=config.house.conditioned_air_fraction)
+                           surface_temp_f=75.5, conditioned_air_fraction=config.house.conditioned_air_fraction,
+                           volume_ft3=config.house.basement_volume_ft3)
         self.model = BasementModel(params, self.profile, [], config.house)
         self.t = start
         # profile hour 0 = local midnight of the start day

@@ -36,30 +36,19 @@
     "cooling_cop": 3.0,
     "heating_cop": 1.0,
     "electricity_cost_per_kwh": 0.13,
-    "natural_ach": 0.3
+    "natural_ach": 0.3,
+    "basement_volume_ft3": 24000
   },
   "fans": [
     {
-      "id": "exhaust_1",
-      "name": "Exhaust fan (east wall)",
+      "id": "v2d",
+      "name": "Tjernlund V2D UnderAire (2 \u00d7 110 CFM)",
       "type": "exhaust",
-      "rated_cfm": 110.0,
-      "actual_cfm": 85.0,
-      "rated_w": 28.0,
+      "rated_cfm": 220.0,
+      "actual_cfm": 220.0,
+      "rated_w": 40.0,
       "motor_load_ok": true,
       "switch_id": "mock-plug-1",
-      "group": "main",
-      "enabled": true
-    },
-    {
-      "id": "exhaust_2",
-      "name": "Exhaust fan (north wall)",
-      "type": "exhaust",
-      "rated_cfm": 110.0,
-      "actual_cfm": 85.0,
-      "rated_w": 28.0,
-      "motor_load_ok": true,
-      "switch_id": "mock-plug-2",
       "group": "main",
       "enabled": true
     }

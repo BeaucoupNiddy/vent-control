@@ -9,11 +9,12 @@ from ventctl.controller import Controller
 from ventctl.hardware.mock import MockSensors, MockSwitches, MockWorld
 from ventctl.storage import Storage
 
-from .helpers import T0
+from .helpers import T0, exhaust_fans
 
 
 def make(mode=Mode.AUTO):
     cfg = example_config()
+    cfg.fans = exhaust_fans(2)  # two fans on two plugs, to test per-plug fail-safes
     cfg.mode = mode
     clock = ManualClock(T0)
     world = MockWorld(cfg, T0)
@@ -154,4 +155,4 @@ def test_storage_migrations_idempotent(tmp_path):
     s.save_config(example_config())
     s2 = Storage(p)
     assert s2.migrate() == 2
-    assert s2.load_config().fans[0].id == "exhaust_1"
+    assert s2.load_config().fans[0].id == "v2d"

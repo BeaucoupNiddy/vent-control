@@ -57,7 +57,7 @@ def test_continuous_and_scheduled_runtimes():
     assert run_strategy("nighttime", p, prof, cfg).summary["fan_runtime_h"] == pytest.approx(36, abs=0.02)
     assert run_strategy("off", p, prof, cfg).summary["fan_runtime_h"] == 0
     r = run_strategy("continuous", p, prof, cfg)
-    assert r.summary["fan_kwh"] == pytest.approx(72 * 2 * 28 / 1000, rel=1e-3)
+    assert r.summary["fan_kwh"] == pytest.approx(72 * 40 / 1000, rel=1e-3)
 
 
 def test_controller_strategies_avoid_condensation_risk():
