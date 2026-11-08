@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- macOS LaunchAgent: starts the controller at login and restarts it if it exits.
+     Edit the two paths below, copy to ~/Library/LaunchAgents/, then:
+     launchctl load ~/Library/LaunchAgents/com.ventctl.plist -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ventctl</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/vent-control/backend/.venv/bin/python</string>
+    <string>-m</string><string>ventctl</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/YOU/vent-control/backend</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VENTCTL_DB</key><string>/Users/YOU/vent-control/data/ventctl.db</string>
+    <key>VENTCTL_PORT</key><string>8000</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/ventctl.log</string>
+  <key>StandardErrorPath</key><string>/tmp/ventctl.log</string>
+</dict>
+</plist>

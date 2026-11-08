@@ -120,6 +120,10 @@ def test_csv_import():
     assert p2.temp_f[0] == pytest.approx(77)
     with pytest.raises(ValueError):
         climate.profile_from_csv("temp_f\n80\n81\n")
+    from pathlib import Path
+    sample = Path(__file__).parents[2] / "examples" / "synthetic_nola_summer_day.csv"
+    p3 = climate.profile_from_csv(sample.read_text())
+    assert p3.hours == 24
 
 
 def test_stats_from_history():

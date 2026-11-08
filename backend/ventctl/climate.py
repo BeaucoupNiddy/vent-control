@@ -129,15 +129,16 @@ def profile_from_csv(text: str, name: str = "Imported CSV") -> ClimateProfile:
     """Parse hourly weather CSV.
 
     Required: a temperature column (``temp_f`` or ``temp_c``) and either a dew
-    point column (``dewpoint_f`` / ``dewpoint_c``) or ``rh_pct``. One row per
-    hour, in order. Other columns are ignored.
+    point column (``dewpoint_f`` / ``dewpoint_c``) or ``rh_pct``. An ``outdoor_``
+    prefix is accepted. Lines starting with # are comments. One row per hour, in
+    order. Other columns are ignored.
     """
-    reader = csv.DictReader(io.StringIO(text.strip()))
-    cols = {c.strip().lower(): c for c in (reader.fieldnames or [])}
+    body = "\n".join(ln for ln in text.strip().splitlines() if not ln.lstrip().startswith("#"))
+    reader = csv.DictReader(io.StringIO(body))
     temps: list[float] = []
     dps: list[float] = []
     for n, row in enumerate(reader, start=2):
-        r = {k.strip().lower(): (v or "").strip() for k, v in row.items() if k}
+        r = {k.strip().lower().removeprefix("outdoor_"): (v or "").strip() for k, v in row.items() if k}
         try:
             if r.get("temp_f"):
                 tf = float(r["temp_f"])
@@ -159,7 +160,6 @@ def profile_from_csv(text: str, name: str = "Imported CSV") -> ClimateProfile:
         dps.append(min(df, tf))
     if len(temps) < 2:
         raise ValueError("CSV needs at least 2 hourly rows")
-    _ = cols
     return ClimateProfile("custom", name, f"{len(temps)} hourly rows imported from CSV", temps, dps,
                           source="imported", notes=["Imported by the user; source as provided."])
 

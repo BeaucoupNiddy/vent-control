@@ -1,0 +1,14 @@
+services:
+  ventctl:
+    build: .
+    container_name: ventctl
+    restart: unless-stopped        # automatic restart after crashes and reboots
+    ports:
+      - "${VENTCTL_PORT:-8000}:8000"
+    environment:
+      VENTCTL_DEMO_SPEED: "${VENTCTL_DEMO_SPEED:-1}"   # >1 speeds up mock time for demos
+      VENTCTL_BACKFILL_HOURS: "${VENTCTL_BACKFILL_HOURS:-48}"
+    volumes:
+      - ventctl-data:/data          # persistent SQLite database (settings + history)
+volumes:
+  ventctl-data:
