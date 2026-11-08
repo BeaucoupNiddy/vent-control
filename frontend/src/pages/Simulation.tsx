@@ -40,11 +40,26 @@ export default function Simulation() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [show, setShow] = useState<"rh" | "td">("rh");
+  const [wx, setWx] = useState<Json>(null);
+  const [station, setStation] = useState("72231012916");
+  const [wStart, setWStart] = useState("2025-07-01");
+  const [wEnd, setWEnd] = useState("2025-07-07");
+  const [wMsg, setWMsg] = useState("");
 
   useEffect(() => {
     api.profiles().then(setProfiles);
     api.simDefaults().then((d) => setParams(d.params));
+    api.weatherCoverage().then(setWx).catch(() => {});
   }, []);
+
+  async function download() {
+    setWMsg("Downloading from NOAA…");
+    try {
+      const r = await api.weatherFetch(station, wStart, wEnd);
+      setWx({ ...wx, cached: r.cached });
+      setWMsg(`Cached ${r.hours} hours.`);
+    } catch (e) { setWMsg(String((e as Error).message)); }
+  }
   useEffect(() => {
     if (profileId.startsWith("nola")) api.profile(profileId).then(setPreview); else setPreview(null);
   }, [profileId]);
@@ -57,6 +72,7 @@ export default function Simulation() {
     try {
       const body: Json = { params: { ...params } };
       if (profileId === "custom") body.csv_text = csv;
+      else if (profileId === "noaa") Object.assign(body, { weather_station: station, weather_start: wStart, weather_end: wEnd });
       else if (profileId.startsWith("recorded")) body.recorded_range = profileId.split(":")[1];
       else body.profile_id = profileId;
       setResult(await api.simRun(body));
@@ -119,6 +135,7 @@ export default function Simulation() {
             <select value={profileId} onChange={(e) => setProfileId(e.target.value)}>
               {profiles.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
               <option value="custom">Custom hourly profile (CSV)</option>
+              <option value="noaa">NOAA observations (cached)</option>
               <option value="recorded:24h">Historical recorded conditions (last 24 h)</option>
               <option value="recorded:7d">Historical recorded conditions (last 7 days)</option>
             </select>
@@ -139,6 +156,20 @@ export default function Simulation() {
           <div className="field" style={{ marginTop: 12 }}>
             <label>Hourly CSV: temp_f or temp_c, plus dewpoint_f, dewpoint_c or rh_pct. One row per hour.</label>
             <textarea rows={6} value={csv} onChange={(e) => setCsv(e.target.value)} />
+          </div>
+        )}
+        {profileId === "noaa" && wx && (
+          <div style={{ marginTop: 12 }}>
+            <div className="form">
+              <div className="field"><label>Station</label><select value={station} onChange={(e) => setStation(e.target.value)}>
+                {Object.entries(wx.stations).map(([k, v]) => <option key={k} value={k}>{String(v)} ({k})</option>)}</select></div>
+              <div className="field"><label>From</label><input type="date" value={wStart} onChange={(e) => setWStart(e.target.value)} /></div>
+              <div className="field"><label>To</label><input type="date" value={wEnd} onChange={(e) => setWEnd(e.target.value)} /></div>
+              <div className="field"><label>&nbsp;</label><button className="btn" onClick={download}>Download &amp; cache from NOAA</button></div>
+            </div>
+            {wMsg && <p className={wMsg.includes("failed") ? "error" : "faint"}>{wMsg}</p>}
+            <p className="faint">Observed hourly data from NOAA NCEI (global-hourly). Downloads need internet once; cached data works offline.
+              Cached: {wx.cached.length ? wx.cached.map((c: Json) => `${c.station} ${c.first.slice(0, 10)} to ${c.last.slice(0, 10)} (${c.hours} h)`).join("; ") : "nothing yet"}.</p>
           </div>
         )}
         {preview && (

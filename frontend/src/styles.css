@@ -196,7 +196,7 @@ tr.best td { background: color-mix(in srgb, var(--good) 8%, transparent); }
 .field input, .field select, textarea {
   border: 1px solid var(--border); background: var(--surface); border-radius: 8px; padding: 6px 8px; width: 100%;
 }
-.field input[type="checkbox"] { width: auto; }
+.field input[type="checkbox"], td input[type="checkbox"], label input[type="checkbox"] { width: 16px; height: 16px; padding: 0; margin: 0; flex: none; }
 textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 .error { color: var(--critical); white-space: pre-wrap; }
 .success { color: var(--good); }

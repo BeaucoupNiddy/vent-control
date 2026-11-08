@@ -2,7 +2,7 @@
 
 A local web app that decides when exchanging basement air with outdoor air actually helps, and runs the fans only then. It compares the **moisture content** (humidity ratio) of basement and outdoor air rather than relative humidity. It checks condensation risk, fan electricity and the cost of pulling conditioned air down from upstairs, and it explains every decision in plain language.
 
-**Status: Phase 1.** This includes the decision engine, psychrometrics, the dynamic moisture simulator, mock sensors and plugs, the dashboard, history, Level 1 replay and tests. Real Ecowitt and Shelly hardware comes in Phase 2. Until then the app runs entirely on mock hardware driven by a physical basement model, so mock fans really change mock humidity.
+**Status: Phases 1–4 built.** The decision engine, psychrometrics, dynamic moisture simulator, dashboard, history and replay (Phase 1). Real hardware: Ecowitt GW1200 sensors (poll or push), TP-Link Tapo, Shelly and Home Assistant plugs with plug-side auto-off watchdogs (Phase 2). Model calibration, dehumidifier monitoring and multiple fan groups (Phase 3). NOAA weather import, seasonal reports and an annual estimate (Phase 4). With no hardware configured, everything runs on mock hardware driven by a physical basement model, and every mock value is labeled.
 
 > Ventilation controls moisture exchange, not drainage. It cannot keep a wet New Orleans basement dry on its own.
 
@@ -56,7 +56,7 @@ The data lives in the `ventctl-data` volume. The container restarts automaticall
 cd backend && python -m pytest -q
 ```
 
-There are 64 tests. They cover every case in the spec's test list (section 18) plus checks against ASHRAE reference values. See *Test map* below.
+There are 89 tests. They cover every case in the spec's test list (section 18) plus checks against ASHRAE reference values. See *Test map* below.
 
 ---
 
@@ -126,19 +126,55 @@ The six strategies are 24/7, daytime, nighttime, dew-point controlled (the engin
 | Plug doesn't confirm a command | Command-failure event and alert. The group is locked out of automatic control for 30 minutes and the controller keeps trying to turn it OFF. |
 | Plug unreachable | Last known state shown separately from verified state, group marked unverified, other fans in the group turned off |
 | Startup or power restore | Reads every plug, turns anything that was ON to OFF, logs the reconciliation, then resumes |
-| Controller computer dies | **Software can't help here.** Configure the plug's own auto-off timer (Shelly `auto_off`) in Phase 2 so a stuck-ON fan stops by itself. |
+| Controller computer dies | The plug's own auto-off timer stops the fan within `hardware_max_on_minutes` (30 by default). The controller re-arms it every tick while a fan should run. A dashboard alert appears if the plug has no working timer. |
 | Manual override | Time-limited and logged. Maintenance mode bypasses interlocks only on purpose and shows a warning. |
 
 Every decision change, command, fault, alert and override is logged with readings, the decision, the reason code, the command and the confirmed switch state (Events page).
 
 The **Diagnostics** page lets you inject mock faults (a frozen sensor, gateway down, an unreachable or stuck plug) and watch the fail-safes work.
 
-## Calibration
+## Hardware setup (Settings, Hardware)
+
+### Sensors: Ecowitt GW1200
+
+- **Polling:** enter the gateway's IP. The app reads `http://<gateway>/get_livedata_info` every `poll_seconds`.
+- **Push (optional, faster):** in the Ecowitt app, Weather Services, Customized: protocol *Ecowitt*, server = this computer's IP, port 8000, path `/data/report/`, interval 60 s. Push and poll readings merge.
+- Click **Discover sensors** to list every channel the gateway reports, then map each one (outdoor, basement rooms, surface probe) and enter calibration offsets.
+- Firmware differs between gateways. `python -m ventctl.tools.capture_ecowitt <ip>` saves a raw response you can attach to a bug report.
+
+### Fans: TP-Link Tapo (Matter mini plugs)
+
+- Provider **tapo**. Enter each plug's IP (give it a DHCP reservation) and your TP-Link account email and password. They are used only to derive the local KLAP key. Control stays on your network, and Matter pairing doesn't interfere.
+- **Watchdog:** the app turns on the plug's built-in auto-off timer. Re-sending ON doesn't restart that timer, so while a fan should keep running the app switches the plug OFF and ON for about a second every N/2 minutes. The timer also applies when you use the Tapo app.
+- **Limits:** the P125M/P100M minis don't measure power, so "unexpected power" and motor-load alerts are unavailable (the P110M and P115 do measure it). TP-Link firmware updates have broken local access before. If that happens, update python-kasa or switch to provider **homeassistant** and control the plug over Matter. Check the plug's rating against the fan motor.
+- Use **Test switch** to confirm ON, OFF and the readback before enabling AUTO.
+
+### Fans: Shelly or Home Assistant
+
+- **Shelly** Gen1 and Gen2/Plus: each command carries a `toggle_after`/`timer`, so the plug turns itself off if the controller stops.
+- **Home Assistant:** URL plus a long-lived token. Sensor and switch entities map to the app's ids. HA has no plug-side timer, so the dashboard shows that the watchdog is missing.
+
+### Dehumidifier and fan groups
+
+- A dehumidifier on a metering plug is monitored read-only: runtime, kWh and estimated water. With *require ventilation to beat dehumidifier* on, fans run only when their g/kWh beats the dehumidifier's.
+- Each fan group has its own zones, fans, mode and decision. History aggregates every zone and keeps per-group detail.
+
+## Model calibration (Reports page)
+
+Fits natural air changes and effective fan CFM to how basement humidity actually responded, using 30-minute blocks and least squares with 95 % ranges. Results are suggestions only. You click Apply, and safety limits are never touched. If the fans rarely switched, the fit says the parameters are uncertain and to keep your assumptions.
+
+## Weather data and reports
+
+- **NOAA:** on the Simulation page, enter a station (MSY is `72231012916`, Lakefront is `72231753917`; both are in the station list) and dates, then download. Hourly observations are cached in SQLite and can drive simulations and the annual estimate. Small gaps are filled and large gaps are refused.
+- **Seasonal report:** mean and max RH, hours above 60 % and 70 %, dew points, runtime, modeled vapor moved, fan kWh, conditioned-air cost and dehumidifier use, by month or season.
+- **Annual estimate:** simulates a representative 6-day period per month under off, 24/7 and optimized control, then scales to the month. It uses NOAA data where cached and synthetic profiles elsewhere, and labels each month.
+
+## Calibrating sensors and assumptions
 
 - **Sensors:** place all the WN31s together for a few hours, then enter temperature and RH offsets per sensor (Settings, Sensors).
 - **Surface temperature:** without a surface probe, measure the coldest slab or wall spot with an IR thermometer in the warmest, most humid week. Enter a value a few °F *below* that as the conservative estimate. Auto mode stays off until you do this or add a probe.
 - **Fan airflow:** rated CFM overstates installed airflow, often by 20–40 % with ducting and grilles. Enter your best estimate as "actual CFM".
-- **Upstairs fraction:** start with 10–25 % for an old tongue-and-groove floor. A differential-pressure sensor (Phase 3) can replace the guess.
+- **Upstairs fraction:** start with 10–25 % for an old tongue-and-groove floor. A differential-pressure sensor can replace the guess.
 
 ## Safety limitations
 
@@ -160,8 +196,12 @@ backend/ventctl/
   simulation.py   dynamic moisture model + six strategies + insights
   climate.py      synthetic profiles, CSV import
   analysis.py     statistics, Level 1 replay, recorded profiles
+  calibration.py  least-squares fit of air changes and fan CFM
+  weather.py      NOAA global-hourly download, parsing, cache
+  reports.py      seasonal report and annual estimate
   storage.py      SQLite schema + migrations
-  hardware/       adapter interfaces, mock hardware, Phase 2 placeholders
+  hardware/       mock, Ecowitt, Tapo, Shelly, Home Assistant adapters
+  tools/          Ecowitt capture tool
   app.py          FastAPI REST API + static dashboard
 frontend/src/     React + TypeScript + Recharts dashboard
 examples/         example config, synthetic sample day
@@ -186,10 +226,10 @@ deploy/           macOS LaunchAgent
 | 15 | `…continuous_and_scheduled_runtimes` |
 | 16 | `…replay_is_labeled_as_opportunity_not_counterfactual` |
 | 17 | `…negative_removal_is_reported_as_moisture_addition`, simulation insights |
+| hardware | `test_hardware.py` (Ecowitt poll/push parsing, Shelly, Home Assistant, Tapo auto-off and re-arm, watchdog when controller stops) |
+| phase 3–4 | `test_calibration.py`, `test_phase4.py` (NOAA parsing and gaps, seasonal and annual reports, API) |
 | units | `test_psychro.py` (ASHRAE table values, dew point, humidity ratio, conversions, calibration) |
 
-## Roadmap
+## Not yet tested on real hardware
 
-- **Phase 2:** Ecowitt GW1200 client (built from a captured response from your gateway), sensor discovery and mapping, Shelly RPC switching with hardware auto-off, live switch health.
-- **Phase 3:** multiple zones and fan groups in the UI, surface and pressure sensing, dehumidifier monitoring, model calibration with uncertainty ranges.
-- **Phase 4:** weather-data imports (with local caching), seasonal reports, annual estimates.
+The adapters are built from documented formats and tested against fake devices. The first run against your gateway and plugs may need small fixes. NOAA downloads couldn't be tried from the build sandbox. The Docker image wasn't built there either.

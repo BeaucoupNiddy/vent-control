@@ -48,7 +48,6 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
   const m = d?.metrics || {};
   const ind = m.indoor, out = m.outdoor;
   const eff = d?.effect;
-  const safety = d?.safety;
   const mo = moisture(eff?.net_removal_g_h);
 
   async function setMode(mode: string) {
@@ -69,7 +68,7 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
       <AlertList alerts={status.alerts} />
 
       <Card
-        title={<span className="row">Ventilation {g?.name ? `· ${g.name}` : ""}</span>}
+        title={<span className="row">Ventilation{status.groups.length === 1 && g?.name ? ` · ${g.name}` : ""}</span>}
         right={
           <div className="row">
             <div className="seg" role="group" aria-label="Operating mode">
@@ -86,41 +85,12 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
         }
       >
         {err && <p className="error">{err}</p>}
-        <div className="hero">
-          <div className={`state-dot ${safety ? "safety" : g?.is_on ? "on" : "off"}`}>
-            <Icon name={safety ? "shield" : "fan"} size={28} />
+        {status.groups.map((grp: Json, i: number) => (
+          <div key={grp.id} style={i > 0 ? { borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 16 } : undefined}>
+            {status.groups.length > 1 && <h3 style={{ marginBottom: 8 }}>{grp.name}{grp.zone ? ` · zone ${grp.zone}` : " · all zones"}</h3>}
+            <GroupDecision g={grp} status={status} />
           </div>
-          <div style={{ flex: 1, minWidth: 240 }}>
-            <div className="row">
-              <span className="state-big">{status.simulation_mode ? (d?.target_on ? "Would run" : "Would stay off") : g?.is_on ? "Fans ON" : "Fans OFF"}</span>
-              <span className="badge">{status.mode.replace("_", " ").toUpperCase()}</span>
-              {status.simulation_mode && <span className="badge mock">no physical commands</span>}
-              {!g?.verified && <span className="badge crit">switch state unverified</span>}
-              {g?.maintenance && <span className="badge crit">maintenance: interlocks bypassed</span>}
-            </div>
-            <p className="explain">{d?.explanation}</p>
-            <div className="row faint">
-              {g?.last_change && <span>Last switched {localTime(g.last_change, true)}</span>}
-              {d?.next_eligible_switch && <span>· Next eligible switch {localTime(d.next_eligible_switch)}</span>}
-              {g?.manual_until && <span>· Manual override ends {localTime(g.manual_until)}</span>}
-              <span>· Profile: {status.energy_profile.replace("_", " ")}</span>
-            </div>
-            {d?.warnings?.map((w: string) => <p key={w} className="note" style={{ marginBottom: 0 }}>{w}</p>)}
-          </div>
-        </div>
-        {d?.checks?.length > 0 && (
-          <ul className="checks" aria-label="Decision checks">
-            {d.checks.map((c: Json) => (
-              <li key={c.id}>
-                <span className={c.ok === true ? "ok" : c.ok === false ? "bad" : "na"} aria-label={c.ok ? "pass" : c.ok === false ? "fail" : "not evaluated"}>
-                  <Icon name={c.ok === true ? "check" : c.ok === false ? "x" : "dash"} />
-                </span>
-                <span>{c.label}{c.hard && <span className="faint"> · safety</span>}</span>
-                <span className="muted detail">{c.detail}</span>
-              </li>
-            ))}
-          </ul>
-        )}
+        ))}
       </Card>
 
       <div className="grid g3">
@@ -157,12 +127,14 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
       </div>
 
       <div className="grid g2">
-        <Card title="Fans">
+        <Card title="Fans" right={status.hardware?.hardware_auto_off_minutes
+          ? <span className="badge good">plug auto-off {status.hardware.hardware_auto_off_minutes} min</span>
+          : status.data_source !== "mock" ? <span className="badge crit">no hardware auto-off</span> : null}>
           <div className="table-wrap">
             <table>
               <thead><tr><th>Fan</th><th>State</th><th className="num">Running</th><th className="num">Power</th></tr></thead>
               <tbody>
-                {g?.fans.map((f: Json) => (
+                {status.groups.flatMap((grp: Json) => grp.fans).map((f: Json) => (
                   <tr key={f.id}>
                     <td>{f.name}<div className="faint">{f.type} · {f.actual_cfm} CFM est. · {f.switch_id}</div></td>
                     <td>
@@ -182,6 +154,11 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
               </tbody>
             </table>
           </div>
+          {status.dehumidifier && (
+            <p className="faint" style={{ marginBottom: 0 }}>{status.dehumidifier.name} (monitored, never switched):{" "}
+              {!status.dehumidifier.monitored ? "no metering plug configured" : status.dehumidifier.reachable === false ? "plug not responding" :
+                status.dehumidifier.running == null ? "unknown" : `${status.dehumidifier.running ? "running" : "idle"} · ${num(status.dehumidifier.power_w, 0)} W`}</p>
+          )}
         </Card>
         <Card title="Sensors" right={<span className={`badge ${status.data_source === "mock" ? "mock" : ""}`}>{status.data_source === "mock" ? "mock data" : status.data_source}</span>}>
           <div className="table-wrap">
@@ -219,6 +196,50 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
             <Stat label="Hours covered" value={hours(stats.hours_covered)} />
           </div>
         </Card>
+      )}
+    </>
+  );
+}
+
+function GroupDecision({ g, status }: { g: Json; status: Json }) {
+  const d = g?.decision;
+  const safety = d?.safety;
+  return (
+    <>
+      <div className="hero">
+        <div className={`state-dot ${safety ? "safety" : g?.is_on ? "on" : "off"}`}>
+          <Icon name={safety ? "shield" : "fan"} size={28} />
+        </div>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <div className="row">
+            <span className="state-big">{status.simulation_mode ? (d?.target_on ? "Would run" : "Would stay off") : g?.is_on ? "Fans ON" : "Fans OFF"}</span>
+            <span className="badge">{status.mode.replace("_", " ").toUpperCase()}</span>
+            {status.simulation_mode && <span className="badge mock">no physical commands</span>}
+            {!g?.verified && <span className="badge crit">switch state unverified</span>}
+            {g?.maintenance && <span className="badge crit">maintenance: interlocks bypassed</span>}
+          </div>
+          <p className="explain">{d?.explanation}</p>
+          <div className="row faint">
+            {g?.last_change && <span>Last switched {localTime(g.last_change, true)}</span>}
+            {d?.next_eligible_switch && <span>· Next eligible switch {localTime(d.next_eligible_switch)}</span>}
+            {g?.manual_until && <span>· Manual override ends {localTime(g.manual_until)}</span>}
+            <span>· Profile: {status.energy_profile.replace("_", " ")}</span>
+          </div>
+          {d?.warnings?.map((w: string) => <p key={w} className="note" style={{ marginBottom: 0 }}>{w}</p>)}
+        </div>
+      </div>
+      {d?.checks?.length > 0 && (
+        <ul className="checks" aria-label="Decision checks">
+          {d.checks.map((c: Json) => (
+            <li key={c.id}>
+              <span className={c.ok === true ? "ok" : c.ok === false ? "bad" : "na"} aria-label={c.ok ? "pass" : c.ok === false ? "fail" : "not evaluated"}>
+                <Icon name={c.ok === true ? "check" : c.ok === false ? "x" : "dash"} />
+              </span>
+              <span>{c.label}{c.hard && <span className="faint"> · safety</span>}</span>
+              <span className="muted detail">{c.detail}</span>
+            </li>
+          ))}
+        </ul>
       )}
     </>
   );

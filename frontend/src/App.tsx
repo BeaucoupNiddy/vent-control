@@ -5,11 +5,12 @@ import Dashboard from "./pages/Dashboard";
 import Diagnostics from "./pages/Diagnostics";
 import Events from "./pages/Events";
 import History from "./pages/History";
+import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
 import Simulation from "./pages/Simulation";
 import { TempUnit, UnitContext } from "./units";
 
-const TABS = ["Dashboard", "History", "Simulation", "Settings", "Events", "Diagnostics"] as const;
+const TABS = ["Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
 type Tab = (typeof TABS)[number];
 
 function load<T>(k: string, d: T): T {
@@ -72,6 +73,7 @@ export default function App() {
         {tab === "Dashboard" && <Dashboard status={status} refresh={refresh} />}
         {tab === "History" && <History />}
         {tab === "Simulation" && <Simulation />}
+        {tab === "Reports" && <Reports />}
         {tab === "Settings" && <Settings onSaved={refresh} />}
         {tab === "Events" && <Events />}
         {tab === "Diagnostics" && <Diagnostics status={status} />}

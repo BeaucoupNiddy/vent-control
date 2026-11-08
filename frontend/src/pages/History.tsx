@@ -91,7 +91,9 @@ export default function History() {
             <Stat label="Above upper RH" value={hours(stats.hours_above_upper)} />
             <Stat label="Above high RH" value={hours(stats.hours_above_high)} />
             <Stat label="Ventilation favorable" badge="modeled" value={pct(stats.favorable_pct)} />
-            <Stat label="Data points" value={rows.length} />
+            <Stat label="Conditioned air lost" badge="modeled" value={`${Math.round(stats.conditioned_air_ft3).toLocaleString()} ft³ · $${stats.conditioned_air_cost.toFixed(2)}`} />
+            {stats.dehumidifier && <Stat label="Dehumidifier" value={`${hours(stats.dehumidifier.runtime_h)} · ${stats.dehumidifier.kwh.toFixed(1)} kWh`} />}
+            {stats.dehumidifier && <Stat label="Dehumidifier water" badge="modeled" value={`${stats.dehumidifier.water_gal_estimate.toFixed(1)} gal`} />}
           </div>
         )}
       </Card>

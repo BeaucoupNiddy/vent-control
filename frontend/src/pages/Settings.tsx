@@ -47,16 +47,16 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "house.cooling_cop", label: "AC efficiency (COP)", step: 0.1 },
     { path: "house.heating_cop", label: "Heating efficiency (COP)", step: 0.1 },
     { path: "house.natural_ach", label: "Natural leakage (ACH)", step: 0.1 },
+    { path: "house.basement_floor_ft2", label: "Basement floor area (ft²)" },
+    { path: "house.basement_ceiling_ft", label: "Basement ceiling height (ft)", step: 0.5 },
   ] },
   { title: "Safety interlocks", note: "Fan control must never override required combustion air, flood openings or legally required ventilation. Have naturally vented gas appliances checked for backdrafting before running exhaust-only ventilation unattended.", fields: [
     { path: "control.water_intrusion_lockout", label: "Water-intrusion lockout active", type: "bool" },
     { path: "control.combustion_interlock", label: "Block exhaust-only (gas appliance present)", type: "bool" },
     { path: "control.max_depressurization_pa", label: "Max basement depressurization (Pa)", nullable: true, hint: "Needs a pressure sensor; blank = off" },
-    { path: "switches.hardware_max_on_minutes", label: "Plug auto-off timer (min)", nullable: true, hint: "Set on the plug itself (Phase 2); protects against controller failure" },
+    { path: "switches.hardware_max_on_minutes", label: "Plug dead-man timer (min)", nullable: true, hint: "The plug turns itself off this long after ON unless the controller re-arms it. Protects against controller failure. Blank = off." },
   ] },
   { title: "Sensors", fields: [
-    { path: "sensors.provider", label: "Sensor provider", type: "select", options: [["mock", "Mock (simulation)"], ["ecowitt", "Ecowitt (Phase 2)"], ["homeassistant", "Home Assistant (Phase 2)"]] },
-    { path: "sensors.ecowitt_host", label: "Ecowitt gateway IP", type: "text" },
     { path: "sensors.poll_seconds", label: "Polling interval (s)" },
     { path: "sensors.stale_minutes", label: "Stale after (min)" },
   ] },
@@ -65,6 +65,9 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "dehumidifier.setpoint_rh_pct", label: "Setpoint RH (%)" },
     { path: "dehumidifier.rated_w", label: "Rated power (W)" },
     { path: "dehumidifier.removal_pints_per_day", label: "Estimated removal (pints/day)" },
+    { path: "dehumidifier.monitor_switch_id", label: "Power-metering plug id", type: "text", hint: "Read only; the app never switches the dehumidifier" },
+    { path: "dehumidifier.running_threshold_w", label: "Running above (W)" },
+    { path: "dehumidifier.require_ventilation_beats_dehumidifier", label: "Energy Saver: fans only when cheaper than dehumidifier", type: "bool" },
   ] },
   { title: "System", fields: [
     { path: "system.port", label: "Port (restart required)" },
@@ -137,6 +140,8 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
         <p className="note">All values are validated before saving. Defaults are starting points, not universally optimal settings.
           The controller never changes safety limits on its own.</p>
       </Card>
+      <Hardware cfg={cfg} change={change} />
+      <Groups cfg={cfg} change={change} />
       {SECTIONS.map((s) => (
         <Card key={s.title} title={s.title}>
           {s.note && <p className="note">{s.note}</p>}
@@ -194,5 +199,143 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
       ))}
       <Card>{saveBar}</Card>
     </>
+  );
+}
+
+function Hardware({ cfg, change }: { cfg: Json; change: (p: string, v: Json) => void }) {
+  const [disc, setDisc] = useState<Json>(null);
+  const [msg, setMsg] = useState("");
+  const [raw, setRaw] = useState<Json>(null);
+  const sw = cfg.switches;
+  const discover = async () => {
+    setMsg("");
+    try { setDisc(await api.discover()); } catch (e) { setMsg(String((e as Error).message)); }
+  };
+  const addMapping = (ch: Json) => change("sensors.mappings", [...cfg.sensors.mappings, {
+    sensor_id: ch.id, name: ch.id, role: ch.kind === "temp" ? "surface" : "basement", zone: ch.kind === "temp" ? null : "main",
+    temp_offset_f: 0, rh_offset_pct: 0, enabled: true }]);
+  const test = async (host: string) => {
+    setMsg("Testing…");
+    try { const r = await api.switchTest(host); setMsg(`${host}: ${JSON.stringify(r.info).slice(0, 160)} · relay ${r.status.on ? "ON" : "OFF"}`); }
+    catch (e) { setMsg(String((e as Error).message)); }
+  };
+  const devTable = (key: "tapo_devices" | "shelly_devices", cols: [string, string][], blank: Json) => (
+    <div className="table-wrap" style={{ marginTop: 8 }}>
+      <table>
+        <thead><tr>{cols.map(([, l]) => <th key={l}>{l}</th>)}<th /></tr></thead>
+        <tbody>
+          {sw[key].map((d: Json, i: number) => (
+            <tr key={i}>
+              {cols.map(([k]) => <td key={k}><input value={d[k] ?? ""} onChange={(e) => change(`switches.${key}.${i}.${k}`, k === "channel" ? Number(e.target.value) : e.target.value)} /></td>)}
+              <td className="row">
+                {key === "shelly_devices" && <button className="btn" onClick={() => test(d.host)}>Test</button>}
+                <button className="btn" onClick={() => change(`switches.${key}`, sw[key].filter((_: Json, j: number) => j !== i))}>Remove</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button className="btn" style={{ marginTop: 6 }} onClick={() => change(`switches.${key}`, [...sw[key], blank])}>Add plug</button>
+    </div>
+  );
+  return (
+    <Card title="Hardware" right={<span className="faint">Save, then the app reconnects with the new hardware</span>}>
+      <div className="form">
+        <div className="field"><label>Sensors</label>
+          <select value={cfg.sensors.provider} onChange={(e) => change("sensors.provider", e.target.value)}>
+            <option value="mock">Mock (simulated basement)</option><option value="ecowitt">Ecowitt gateway</option><option value="homeassistant">Home Assistant</option>
+          </select></div>
+        <div className="field"><label>Fan plugs</label>
+          <select value={sw.provider} onChange={(e) => change("switches.provider", e.target.value)}>
+            <option value="mock">Mock</option><option value="tapo">TP-Link Tapo</option><option value="shelly">Shelly</option><option value="homeassistant">Home Assistant (incl. Matter)</option>
+          </select></div>
+      </div>
+
+      {cfg.sensors.provider === "ecowitt" && (<>
+        <h3 style={{ margin: "14px 0 6px" }}>Ecowitt GW1200</h3>
+        <div className="form">
+          <div className="field"><label>Gateway IP</label><input value={cfg.sensors.ecowitt_host} placeholder="192.168.1.50" onChange={(e) => change("sensors.ecowitt_host", e.target.value)} />
+            <span className="hint">Polled at /get_livedata_info</span></div>
+          <div className="field"><label>Accept pushed data</label><label className="row"><input type="checkbox" checked={cfg.sensors.ecowitt_push} onChange={(e) => change("sensors.ecowitt_push", e.target.checked)} /> Customized upload</label>
+            <span className="hint">In the Ecowitt app: Weather Services → Customized → protocol Ecowitt, server = this computer's IP, port 8000, path /data/report/, interval 60 s.</span></div>
+        </div>
+      </>)}
+      {(cfg.sensors.provider === "homeassistant" || sw.provider === "homeassistant") && (<>
+        <h3 style={{ margin: "14px 0 6px" }}>Home Assistant</h3>
+        <div className="form">
+          <div className="field"><label>URL</label><input value={cfg.homeassistant.url} placeholder="http://homeassistant.local:8123" onChange={(e) => change("homeassistant.url", e.target.value)} /></div>
+          <div className="field"><label>Long-lived token</label><input type="password" value={cfg.homeassistant.token} onChange={(e) => change("homeassistant.token", e.target.value)} /></div>
+        </div>
+        {cfg.sensors.provider === "homeassistant" && <div className="field" style={{ marginTop: 8 }}><label>Sensor entities (JSON: sensor id → temp / rh / pressure_pa entity)</label>
+          <textarea rows={5} defaultValue={JSON.stringify(cfg.homeassistant.sensor_entities, null, 2)}
+            onBlur={(e) => { try { change("homeassistant.sensor_entities", JSON.parse(e.target.value || "{}")); setMsg(""); } catch { setMsg("Sensor entities: invalid JSON"); } }} /></div>}
+        {sw.provider === "homeassistant" && <p className="faint">For Home Assistant plugs, set each fan's switch id to the entity id, e.g. switch.basement_fan.</p>}
+      </>)}
+      {sw.provider === "tapo" && (<>
+        <h3 style={{ margin: "14px 0 6px" }}>TP-Link Tapo plugs</h3>
+        <p className="note">Local control through python-kasa. Your TP-Link account is used only to build the local connection key and is stored only in this
+          computer's database. The app turns on each plug's own auto-off timer ({sw.hardware_max_on_minutes ?? "—"} min) and re-arms it while fans run,
+          causing a ~1 s off/on blip about every {sw.hardware_max_on_minutes ? Math.round(sw.hardware_max_on_minutes / 2) : "—"} minutes.
+          Only energy-monitoring models (P110M/P115) report watts. Give each plug a fixed IP in your router.</p>
+        <div className="form">
+          <div className="field"><label>TP-Link account email</label><input value={sw.tapo_username} onChange={(e) => change("switches.tapo_username", e.target.value)} /></div>
+          <div className="field"><label>TP-Link password</label><input type="password" value={sw.tapo_password} onChange={(e) => change("switches.tapo_password", e.target.value)} /></div>
+        </div>
+        {devTable("tapo_devices", [["switch_id", "Switch id (used by fans)"], ["host", "Plug IP"]], { switch_id: `tapo-${sw.tapo_devices.length + 1}`, host: "" })}
+      </>)}
+      {sw.provider === "shelly" && (<>
+        <h3 style={{ margin: "14px 0 6px" }}>Shelly plugs</h3>
+        {devTable("shelly_devices", [["switch_id", "Switch id (used by fans)"], ["host", "Plug IP"], ["channel", "Channel"]],
+          { switch_id: `shelly-${sw.shelly_devices.length + 1}`, host: "", channel: 0, generation: "auto", username: "", password: "" })}
+      </>)}
+
+      <div className="row" style={{ marginTop: 14 }}>
+        <button className="btn" onClick={discover}>Discover sensor channels</button>
+        {cfg.sensors.provider === "ecowitt" && <button className="btn" onClick={async () => setRaw(await api.sensorsRaw())}>Show raw gateway data</button>}
+        {msg && <span className={msg.startsWith("Testing") ? "faint" : "error"}>{msg}</span>}
+      </div>
+      {disc && (
+        <div className="table-wrap" style={{ marginTop: 8 }}>
+          <table>
+            <thead><tr><th>Channel</th><th>Type</th><th className="num">Temp</th><th className="num">RH</th><th /></tr></thead>
+            <tbody>{disc.channels.map((ch: Json) => (
+              <tr key={ch.id}><td>{ch.id}</td><td>{ch.kind}</td>
+                <td className="num">{ch.temp_c != null ? `${(ch.temp_c * 9 / 5 + 32).toFixed(1)}°F` : "—"}</td>
+                <td className="num">{ch.rh_pct != null ? `${ch.rh_pct}%` : "—"}</td>
+                <td>{cfg.sensors.mappings.some((m: Json) => m.sensor_id === ch.id) ? <span className="faint">mapped</span> :
+                  <button className="btn" onClick={() => addMapping(ch)}>Add to mappings</button>}</td></tr>
+            ))}</tbody>
+          </table>
+          <p className="faint">After adding, set each sensor's location and zone below (Sensors), then save.</p>
+        </div>
+      )}
+      {raw && <pre>{JSON.stringify(raw, null, 2)}</pre>}
+    </Card>
+  );
+}
+
+function Groups({ cfg, change }: { cfg: Json; change: (p: string, v: Json) => void }) {
+  const zones = [...new Set(cfg.sensors.mappings.filter((m: Json) => m.role === "basement").map((m: Json) => m.zone).filter(Boolean))] as string[];
+  return (
+    <Card title="Fan groups and zones">
+      <p className="note">Each group is decided independently. A group can serve one basement zone (its sensors only) or all zones together.</p>
+      <div className="table-wrap">
+        <table>
+          <thead><tr><th>Group id</th><th>Name</th><th>Zone served</th><th>Fans</th><th /></tr></thead>
+          <tbody>{cfg.groups.map((g: Json, i: number) => (
+            <tr key={i}>
+              <td className="faint">{g.id}</td>
+              <td><input value={g.name} onChange={(e) => change(`groups.${i}.name`, e.target.value)} /></td>
+              <td><select value={g.zone ?? ""} onChange={(e) => change(`groups.${i}.zone`, e.target.value || null)}>
+                <option value="">All zones (aggregate)</option>{zones.map((z) => <option key={z} value={z}>{z}</option>)}</select></td>
+              <td>{cfg.fans.filter((f: Json) => f.group === g.id).map((f: Json) => f.name).join(", ") || <span className="faint">none</span>}</td>
+              <td>{cfg.groups.length > 1 && !cfg.fans.some((f: Json) => f.group === g.id) &&
+                <button className="btn" onClick={() => change("groups", cfg.groups.filter((_: Json, j: number) => j !== i))}>Remove</button>}</td>
+            </tr>
+          ))}</tbody>
+        </table>
+      </div>
+      <button className="btn" style={{ marginTop: 8 }} onClick={() => change("groups", [...cfg.groups, { id: `group_${cfg.groups.length + 1}`, name: `Group ${cfg.groups.length + 1}`, zone: null }])}>Add group</button>
+    </Card>
   );
 }
