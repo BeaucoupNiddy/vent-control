@@ -83,7 +83,6 @@ class Controller:
     _rh_above: dict[str, datetime | None] = field(default_factory=dict)
     _cycle_times: list[datetime] = field(default_factory=list)
     _command_failures: dict[str, tuple] = field(default_factory=dict)
-    _armed: dict[str, datetime] = field(default_factory=dict)  # last hardware auto-off arm per switch
     dehum_status: SwitchStatus | None = None
     _started: bool = False
     _task: asyncio.Task | None = None
@@ -208,8 +207,6 @@ class Controller:
                        "confirmed_state": res.on, "reachable": res.reachable, "error": res.error,
                        "reason_code": d.reason_code}
             if ok:
-                if d.target_on:
-                    self._armed[f.switch_id] = now
                 if failed is None or failed[2] == d.target_on:
                     self._command_failures.pop(f.switch_id, None)
                 self.storage.add_event(now, "command", "info",
@@ -233,20 +230,16 @@ class Controller:
     async def _rearm_watchdogs(self, now: datetime) -> None:
         """Keep the plugs' hardware auto-off timers from expiring while fans should run.
 
-        If this process stops, nobody re-arms them and the plugs switch off on their own.
+        The adapter decides when a re-arm is actually needed. If this process stops,
+        nobody re-arms the timers and the plugs switch off on their own.
         """
-        minutes = self.config.switches.hardware_max_on_minutes
         rearm = getattr(self.switches, "rearm", None)
-        if not minutes or rearm is None or self.config.mode == Mode.SIMULATION:
+        if not self.config.switches.hardware_max_on_minutes or rearm is None or self.config.mode == Mode.SIMULATION:
             return
         for f in self.config.fans:
             info = self.switch_info.get(f.switch_id)
-            if not (f.enabled and info and info.reachable and info.confirmed and info.commanded):
-                continue
-            last = self._armed.get(f.switch_id)
-            if last is None or (now - last) >= timedelta(minutes=minutes / 3):
-                await rearm(f.switch_id)
-                self._armed[f.switch_id] = now
+            if f.enabled and info and info.reachable and info.confirmed and info.commanded:
+                await rearm(f.switch_id, now)
 
     async def _read_dehumidifier(self) -> None:
         dh = self.config.dehumidifier

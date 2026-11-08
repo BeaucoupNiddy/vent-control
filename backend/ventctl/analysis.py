@@ -41,6 +41,8 @@ def _intervals(rows: list[dict]) -> list[float]:
 def stats(rows: list[dict], config: AppConfig) -> dict:
     hrs = _intervals(rows)
     runtime = cycles = removed_g = kwh = above60 = above70 = fav = total = 0.0
+    cond_ft3 = penalty_kwh = dh_h = dh_kwh = 0.0
+    dh_known = False
     prev_on = False
     min_rem, _ = profile_thresholds(config)
     for r, h in zip(rows, hrs):
@@ -53,6 +55,12 @@ def stats(rows: list[dict], config: AppConfig) -> dict:
             runtime += h
             removed_g += (r["removal_g_h"] or 0) * h
         kwh += (r["power_w"] or 0) * h / 1000
+        cond_ft3 += (r.get("cond_air_cfm") or 0) * h * 60
+        penalty_kwh += (r.get("penalty_w") or 0) * h / 1000
+        if r.get("dehum_on") is not None:
+            dh_known = True
+            dh_h += h if r["dehum_on"] else 0
+            dh_kwh += (r.get("dehum_power_w") or 0) * h / 1000
         rh = r["indoor_rh"]
         if rh is not None:
             above60 += h if rh > config.control.upper_rh_pct else 0
@@ -73,6 +81,17 @@ def stats(rows: list[dict], config: AppConfig) -> dict:
         "hours_above_high": above70,
         "favorable_pct": (fav / total * 100) if total else None,
         "favorable_label": "modeled",
+        "conditioned_air_ft3": cond_ft3,
+        "conditioned_air_kwh": penalty_kwh,
+        "conditioned_air_cost": penalty_kwh * config.house.electricity_cost_per_kwh,
+        "conditioned_air_label": "modeled (assumed upstairs fraction)",
+        "dehumidifier": None if not dh_known else {
+            "runtime_h": dh_h,
+            "kwh": dh_kwh,
+            "cost": dh_kwh * config.house.electricity_cost_per_kwh,
+            "water_gal_estimate": dh_h * config.dehumidifier.removal_pints_per_day / 24 / 8,
+            "label": "runtime and energy measured at the plug; water removed estimated from the rated capacity",
+        },
     }
 
 

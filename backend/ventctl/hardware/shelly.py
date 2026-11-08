@@ -32,6 +32,7 @@ class ShellySwitches(SwitchController):
         self.timeout = timeout
         self.auto_off_s = int(auto_off_minutes * 60) if auto_off_minutes else None
         self._gen: dict[str, int] = {}
+        self._armed: dict = {}
 
     def supports_hardware_auto_off(self) -> bool:
         return self.auto_off_s is not None
@@ -85,11 +86,17 @@ class ShellySwitches(SwitchController):
                 await get_json(f"{url}/relay/{d.channel}?{q}", self.timeout, d.username, d.password)
         except HardwareError as e:
             return SwitchStatus(switch_id, None, False, error=str(e), ts=now)
+        if on and timer:
+            self._armed[switch_id] = now
         return await self.get(switch_id)
 
-    async def rearm(self, switch_id: str) -> None:
-        """Re-send ON with a fresh hardware timer while the fan should keep running."""
-        if self.auto_off_s:
+    async def rearm(self, switch_id: str, now=None) -> None:
+        """Re-send ON with a fresh hardware timer (every third of the timer) while the fan should keep running."""
+        if not self.auto_off_s:
+            return
+        now = now or self.clock.now()
+        last = self._armed.get(switch_id)
+        if last is None or (now - last).total_seconds() >= self.auto_off_s / 3:
             await self.set(switch_id, True)
 
     async def device_info(self, host: str) -> dict:

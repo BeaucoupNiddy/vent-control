@@ -173,7 +173,6 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             sensors, switches, world = factory.build(new, c.clock, state.get("world"), c.clock.now())
             c.sensors, c.switches = sensors, switches
             c.data_source = factory.data_source(new)
-            c._armed.clear()
             state["world"] = world
             c.storage.add_event(c.clock.now(), "config", "warning",
                                 f"Hardware adapters changed: sensors={new.sensors.provider}, switches={new.switches.provider}",

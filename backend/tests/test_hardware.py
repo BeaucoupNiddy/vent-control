@@ -237,3 +237,113 @@ def test_controller_rearms_hardware_watchdog_and_runs_real_adapters(dev):
     assert n2 == n + 1
     assert "NO_HARDWARE_WATCHDOG" not in ctrl.alerts
     assert ctrl.config.mode == Mode.AUTO
+
+
+# ---------------------------------------------------------------- Tapo (python-kasa) with a fake device
+class FakeAutoOff:
+    def __init__(self, dev):
+        self.dev, self.delay, self.enabled = dev, 120, False
+
+    async def set_delay(self, d):
+        self.delay = d
+
+    async def set_enabled(self, e):
+        self.enabled = e
+
+    @property
+    def auto_off_at(self):
+        if not (self.enabled and self.dev.is_on):
+            return None
+        return self.dev.on_at + timedelta(minutes=self.delay)
+
+
+class FakeTapo:
+    """Mimics the parts of kasa.Device the adapter uses; time is controlled by the test clock."""
+
+    def __init__(self, clock, energy=False):
+        from kasa import Module
+        self.clock, self.is_on, self.on_at, self.calls, self.fail = clock, False, None, [], False
+        self.modules = {Module.AutoOff: FakeAutoOff(self)}
+        if energy:
+            self.modules[Module.Energy] = type("E", (), {"current_consumption": 0.0})()
+        self.energy = self.modules.get(Module.Energy)
+
+    @property
+    def time(self):
+        return self.clock.now()
+
+    async def update(self):
+        if self.fail:
+            from kasa import KasaException
+            raise KasaException("timeout")
+        mod = next(iter(self.modules.values()))
+        if self.is_on and mod.enabled and self.clock.now() >= self.on_at + timedelta(minutes=mod.delay):
+            self.is_on = False  # the plug's own auto-off fired
+        if self.energy:
+            self.energy.current_consumption = 26.0 if self.is_on else 0.0
+
+    async def turn_on(self):
+        self.calls.append("on")
+        if not self.is_on:
+            self.on_at = self.clock.now()
+        self.is_on = True
+
+    async def turn_off(self):
+        self.calls.append("off")
+        self.is_on = False
+
+
+def tapo(clock, minutes=30, energy=False):
+    from ventctl.config import TapoDevice
+    from ventctl.hardware.tapo import TapoSwitches
+    fake = FakeTapo(clock, energy)
+
+    async def connect(host):
+        return fake
+    sw = TapoSwitches([TapoDevice(switch_id="t", host="10.0.0.9")], clock, "me@x", "pw",
+                      auto_off_minutes=minutes, connector=connect)
+    return sw, fake
+
+
+def test_tapo_enables_plug_auto_off_and_switches():
+    clock = ManualClock(T0)
+    sw, fake = tapo(clock, minutes=30, energy=True)
+    st = asyncio.run(sw.set("t", True))
+    assert st.reachable and st.on and st.power_w == 26.0
+    from kasa import Module
+    assert fake.modules[Module.AutoOff].enabled and fake.modules[Module.AutoOff].delay == 30
+    assert sw.supports_hardware_auto_off()
+    assert asyncio.run(sw.set("t", False)).on is False
+
+
+def test_tapo_mini_without_energy_monitoring_reports_no_power():
+    sw, _ = tapo(ManualClock(T0))
+    assert asyncio.run(sw.set("t", True)).power_w is None
+
+
+def test_tapo_rearm_restarts_countdown_before_it_fires():
+    clock = ManualClock(T0)
+    sw, fake = tapo(clock, minutes=30)
+    asyncio.run(sw.set("t", True))
+    for minute in range(1, 120):
+        clock.set(T0 + timedelta(minutes=minute))
+        asyncio.run(sw.rearm("t"))
+        assert asyncio.run(sw.get("t")).on, f"plug turned itself off at minute {minute}"
+    assert fake.calls.count("off") >= 6  # brief off/on blips every ~15 min
+
+
+def test_tapo_plug_turns_off_by_itself_if_controller_stops():
+    clock = ManualClock(T0)
+    sw, fake = tapo(clock, minutes=30)
+    asyncio.run(sw.set("t", True))
+    clock.set(T0 + timedelta(minutes=31))  # no re-arm: controller is dead
+    assert asyncio.run(sw.get("t")).on is False
+
+
+def test_tapo_unreachable():
+    clock = ManualClock(T0)
+    sw, fake = tapo(clock)
+    asyncio.run(sw.get("t"))
+    fake.fail = True
+    st = asyncio.run(sw.get("t"))
+    assert not st.reachable and "timeout" in st.error

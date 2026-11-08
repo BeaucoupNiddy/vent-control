@@ -11,6 +11,7 @@ from .ecowitt import EcowittSource
 from .homeassistant import HASensors, HASwitches, HomeAssistant
 from .mock import MockSensors, MockSwitches, MockWorld
 from .shelly import ShellySwitches
+from .tapo import TapoSwitches
 
 
 def needs_mock_world(cfg: AppConfig) -> bool:
@@ -29,8 +30,12 @@ def build(cfg: AppConfig, clock: Clock, world: MockWorld | None, start: datetime
     else:
         sensors = MockSensors(world, clock)  # type: ignore[arg-type]
 
-    if cfg.switches.provider == "shelly":
-        switches: SwitchController = ShellySwitches(cfg.switches.shelly_devices, clock, cfg.switches.timeout_s,
+    if cfg.switches.provider == "tapo":
+        switches: SwitchController = TapoSwitches(cfg.switches.tapo_devices, clock, cfg.switches.tapo_username,
+                                                  cfg.switches.tapo_password, max(cfg.switches.timeout_s, 5),
+                                                  cfg.switches.hardware_max_on_minutes)
+    elif cfg.switches.provider == "shelly":
+        switches = ShellySwitches(cfg.switches.shelly_devices, clock, cfg.switches.timeout_s,
                                                     cfg.switches.hardware_max_on_minutes)
     elif cfg.switches.provider == "homeassistant":
         switches = HASwitches(ha, clock)

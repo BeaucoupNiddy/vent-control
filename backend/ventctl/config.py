@@ -129,6 +129,8 @@ class HouseSettings(BaseModel):
     heating_cop: float = Field(1.0, gt=0.5, le=6, description="1.0 = resistance / gas-equivalent; 3 = heat pump")
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
     natural_ach: float = Field(0.3, ge=0, le=10, description="Natural air changes per hour (simulation)")
+    basement_floor_ft2: float = Field(1000, gt=10, le=20000)
+    basement_ceiling_ft: float = Field(7, gt=3, le=20)
 
 
 class Dehumidifier(BaseModel):
@@ -170,8 +172,13 @@ class ShellyDevice(BaseModel):
     password: str = ""
 
 
+class TapoDevice(BaseModel):
+    switch_id: str = Field(..., description="Id used by fans (Fan.switch_id)")
+    host: str = Field(..., description="Plug IP address (give it a DHCP reservation)")
+
+
 class SwitchSettings(BaseModel):
-    provider: Literal["mock", "shelly", "homeassistant"] = "mock"
+    provider: Literal["mock", "tapo", "shelly", "homeassistant"] = "mock"
     verify_after_command: bool = True
     startup_state: Literal["off"] = "off"
     hardware_max_on_minutes: float | None = Field(
@@ -179,6 +186,9 @@ class SwitchSettings(BaseModel):
         description="Dead-man timer: every ON command arms the plug's own auto-off. The controller re-arms it while "
                     "the fans should stay on, so if this computer stops the plug turns itself off.")
     shelly_devices: list[ShellyDevice] = Field(default_factory=list)
+    tapo_devices: list[TapoDevice] = Field(default_factory=list)
+    tapo_username: str = Field("", description="TP-Link account email (used only for the local handshake)")
+    tapo_password: str = Field("", description="TP-Link account password (stored only in the local database)")
     timeout_s: float = Field(4, ge=0.5, le=30)
 
 
