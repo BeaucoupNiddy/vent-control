@@ -201,5 +201,5 @@ def recorded_profile(rows: list[dict], name: str = "Recorded outdoor conditions"
 def range_for(key: str, now: datetime, start: str | None = None, end: str | None = None) -> tuple[datetime, datetime]:
     if key == "custom" and start and end:
         return datetime.fromisoformat(start), datetime.fromisoformat(end)
-    days = {"24h": 1, "7d": 7, "30d": 30}.get(key, 1)
+    days = {"24h": 1, "7d": 7, "30d": 30, "90d": 90, "365d": 365, "all": 3650}.get(key, 1)
     return now - timedelta(days=days), now

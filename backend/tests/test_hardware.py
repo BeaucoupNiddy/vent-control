@@ -347,3 +347,20 @@ def test_tapo_unreachable():
     fake.fail = True
     st = asyncio.run(sw.get("t"))
     assert not st.reachable and "timeout" in st.error
+
+
+def test_ecowitt_push_endpoint_and_discovery(tmp_path):
+    from fastapi.testclient import TestClient
+    from ventctl.app import create_app
+    from ventctl.storage import Storage as S
+    cfg = example_config()
+    cfg.sensors.provider = "ecowitt"  # no host: push only
+    S(tmp_path / "e.db").save_config(cfg)
+    with TestClient(create_app(str(tmp_path / "e.db"), backfill_hours=48, start_loop=False)) as c:
+        assert c.get("/api/history").json()["rows"] == []  # no mock backfill with real sensors
+        r = c.post("/data/report/", content="PASSKEY=x&tempf=85.1&humidity=60&temp1f=79&humidity1=82&tf_ch1=75",
+                   headers={"Content-Type": "application/x-www-form-urlencoded"})
+        assert r.json() == {"accepted": 3}
+        d = c.get("/api/sensors/discover").json()
+        assert {"ecowitt:outdoor", "ecowitt:ch1", "ecowitt:tf1"} <= {x["id"] for x in d["channels"]}
+        assert c.get("/api/status").json()["data_source"] == "measured"

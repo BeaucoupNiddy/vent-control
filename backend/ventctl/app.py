@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, climate, simulation
+from . import analysis, calibration, climate, reports, simulation, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -61,6 +61,9 @@ class SimRequest(BaseModel):
     custom_dewpoint_f: list[float] | None = None
     csv_text: str | None = None
     recorded_range: str | None = None  # "24h" | "7d" | "30d" for historical recorded conditions
+    weather_station: str | None = None  # use cached NOAA observations ...
+    weather_start: str | None = None  # ... from this date (YYYY-MM-DD)
+    weather_end: str | None = None
     strategies: list[str] | None = None
 
 
@@ -82,9 +85,29 @@ class SwitchTestRequest(BaseModel):
     generation: str = "auto"
 
 
+class CalibrationApply(BaseModel):
+    natural_ach: float | None = None
+    fan_cfm_total: float | None = None
+
+
+class WeatherFetch(BaseModel):
+    station: str = weather.DEFAULT_STATION
+    start: str  # YYYY-MM-DD
+    end: str
+
+
+class AnnualRequest(BaseModel):
+    params: simulation.SimParams = simulation.SimParams()
+    use_observed: bool = True
+
+
 class CalcRequest(BaseModel):
     t_f: float
     rh_pct: float
+
+
+def _day(s: str) -> datetime:
+    return datetime.fromisoformat(s[:10]).replace(tzinfo=timezone.utc)
 
 
 async def backfill(ctrl: Controller, clock: ManualClock, until: datetime) -> None:
@@ -273,6 +296,10 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
                 prof = climate.profile_from_csv(req.csv_text)
             elif req.custom_temp_f and req.custom_dewpoint_f:
                 prof = climate.custom_profile(req.custom_temp_f, req.custom_dewpoint_f)
+            elif req.weather_station and req.weather_start and req.weather_end:
+                ws, we = _day(req.weather_start), _day(req.weather_end)
+                rows = state["storage"].cached_weather(weather.SOURCE, req.weather_station, ws, we)
+                prof = weather.profile_from_cache(rows, req.weather_station, ws, we)
             elif req.recorded_range:
                 s, e = analysis.range_for(req.recorded_range, ctrl().clock.now())
                 prof = analysis.recorded_profile(state["storage"].history(s, e, 10**7))
@@ -291,6 +318,76 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         if len(rows) < 2:
             raise HTTPException(400, "not enough recorded history in this range")
         return analysis.replay(rows, ctrl().config, tz())
+
+    @app.get("/api/calibration")
+    def get_calibration(range: str = "30d"):
+        s, e = analysis.range_for(range, ctrl().clock.now())
+        return calibration.calibrate(state["storage"].history(s, e, 10**7), ctrl().config)
+
+    @app.post("/api/calibration/apply")
+    def apply_calibration(req: CalibrationApply):
+        """Apply suggested model values. Only on explicit user request; never touches safety limits."""
+        c = ctrl()
+        new = c.config.model_copy(deep=True)
+        changes = {}
+        if req.natural_ach is not None:
+            new.house.natural_ach = round(req.natural_ach, 3)
+            changes["natural_ach"] = new.house.natural_ach
+        if req.fan_cfm_total is not None:
+            fans = [f for f in new.fans if f.enabled]
+            total = sum(f.actual_cfm for f in fans)
+            if total > 0:
+                k = req.fan_cfm_total / total
+                for f in fans:
+                    f.actual_cfm = round(f.actual_cfm * k, 1)
+                changes["fan_cfm_total"] = req.fan_cfm_total
+        new = AppConfig.model_validate(new.model_dump())
+        c.apply_config(new)
+        c.storage.add_event(c.clock.now(), "config", "info", f"Calibration values applied by user: {changes}",
+                            "CALIBRATION_APPLIED", changes)
+        return new.model_dump(mode="json")
+
+    @app.get("/api/weather/coverage")
+    def weather_coverage():
+        return {"stations": weather.STATIONS, "default": weather.DEFAULT_STATION,
+                "cached": state["storage"].weather_coverage()}
+
+    @app.post("/api/weather/fetch")
+    async def weather_fetch(req: WeatherFetch):
+        try:
+            rows = await weather.fetch_noaa(req.station, _day(req.start), _day(req.end) + timedelta(days=1))
+        except (HardwareError, ValueError) as e:
+            raise HTTPException(502, f"NOAA download failed: {e}")
+        n = state["storage"].cache_weather(weather.SOURCE, req.station, rows)
+        return {"hours": n, "cached": state["storage"].weather_coverage()}
+
+    @app.get("/api/reports/seasonal")
+    def seasonal_report(range: str = "365d"):
+        s, e = analysis.range_for(range, ctrl().clock.now())
+        return reports.seasonal(state["storage"].history(s, e, 10**7), ctrl().config, tz())
+
+    @app.post("/api/reports/annual")
+    def annual_report(req: AnnualRequest):
+        observed = {}
+        if req.use_observed:
+            for cov in state["storage"].weather_coverage():
+                first, last = datetime.fromisoformat(cov["first"]), datetime.fromisoformat(cov["last"])
+                for m in range(1, 13):
+                    if m in observed:
+                        continue
+                    for year in range(last.year, first.year - 1, -1):
+                        ms = datetime(year, m, 1, tzinfo=timezone.utc)
+                        me = datetime(year + (m == 12), m % 12 + 1, 1, tzinfo=timezone.utc)
+                        rows = state["storage"].cached_weather(cov["source"], cov["station"], ms, me)
+                        if len(rows) > 24 * 20:
+                            base = reports.synthetic_month(m)
+                            try:
+                                observed[m] = weather.profile_from_cache(rows, cov["station"], ms, me,
+                                                                         base.basement_temp_f, base.surface_temp_f)
+                            except ValueError:
+                                continue
+                            break
+        return reports.annual(ctrl().config, req.params, observed)
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):
