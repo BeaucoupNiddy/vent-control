@@ -310,6 +310,7 @@ The **Diagnostics** page lets you inject mock faults (a frozen sensor, gateway d
 
 - Provider **tapo**. Enter each plug's IP (give it a DHCP reservation) and your TP-Link account email and password. They are used only to derive the local KLAP key. Control stays on your network, and Matter pairing doesn't interfere.
 - **Watchdog:** the app turns on the plug's built-in auto-off timer. Re-sending ON doesn't restart that timer, so while a fan should keep running the app switches the plug OFF and ON for about a second every N/2 minutes. The timer also applies when you use the Tapo app.
+- **This house:** Tapo P125M minis (Patrick has six): one for the Tjernlund V2D, one for each HT-900 circulation fan, three spare. The P125M is rated 15 A / 1800 W, far above these fans. It has no power meter, so runtime is measured and energy is estimated from each fan's rated watts.
 - **Limits:** the P125M/P100M minis don't measure power, so "unexpected power" and motor-load alerts are unavailable (the P110M and P115 do measure it). TP-Link firmware updates have broken local access before. If that happens, update python-kasa or switch to provider **homeassistant** and control the plug over Matter. Check the plug's rating against the fan motor.
 - Use **Test switch** to confirm ON, OFF and the readback before enabling AUTO.
 
