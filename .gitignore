@@ -9,3 +9,4 @@ frontend/dist/
 backend/ventctl/static/
 .venv/
 .DS_Store
+frontend/tsconfig.tsbuildinfo
