@@ -16,6 +16,7 @@
   --series-5: #e87ba4;
   --series-6: #008300;
   --fan-shade: rgba(42, 120, 214, 0.10);
+  --band-shade: rgba(27, 175, 122, 0.10);
   --grid: #e7e6e1;
   --good: #0ca30c;
   --warning: #fab219;
@@ -45,6 +46,7 @@
     --series-5: #d55181;
     --series-6: #008300;
     --fan-shade: rgba(57, 135, 229, 0.16);
+    --band-shade: rgba(25, 158, 112, 0.14);
     --grid: #2a2a28;
     --good-bg: #13261a;
     --warn-bg: #2b2414;
@@ -68,6 +70,7 @@
   --series-5: #d55181;
   --series-6: #008300;
   --fan-shade: rgba(57, 135, 229, 0.16);
+  --band-shade: rgba(25, 158, 112, 0.14);
   --grid: #2a2a28;
   --good-bg: #13261a;
   --warn-bg: #2b2414;
@@ -214,3 +217,16 @@ textarea { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
 details summary { cursor: pointer; }
 pre { white-space: pre-wrap; word-break: break-word; font-size: 11px; background: var(--surface-2); padding: 8px; border-radius: 8px; max-height: 300px; overflow: auto; }
 .note { font-size: 12px; color: var(--text-2); border-left: 3px solid var(--border); padding-left: 10px; }
+
+/* TAMO utility breakdown */
+.btn.link { border: none; background: none; padding: 0 4px; color: var(--accent); text-decoration: underline; cursor: pointer; }
+.ubar { display: grid; grid-template-columns: 130px 1fr 80px; align-items: center; gap: 8px; margin: 4px 0; font-size: 13px; }
+.ubar-label { color: var(--text-2); }
+.ubar-track { height: 10px; background: var(--surface-2); border-radius: 5px; overflow: hidden; }
+.ubar-fill { display: block; height: 100%; border-radius: 5px; }
+.ubar-fill.pos { background: var(--series-3); }
+.ubar-fill.neg { background: var(--series-2); }
+.ubar-fill.net { background: var(--series-1); }
+.ubar-fill.net.neg { background: var(--critical); }
+.ubar-val { text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 520px) { .ubar { grid-template-columns: 100px 1fr 64px; } }

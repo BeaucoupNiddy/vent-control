@@ -97,10 +97,10 @@ M·dW/dt = fan outdoor flow·(W_out−W) + fan upstairs flow·(W_up−W) + infil
 ```
 
 - The **buffer** is a simple wood and concrete reservoir: flux to the air = (S − capacity·RH) ÷ τ. Set capacity to 0 to turn it off.
-- Basement **temperature** relaxes toward a daily profile and is nudged by incoming air, so RH is always derived from W at the simulated temperature.
+- Basement **temperature** uses the same two-node air and structure model as the live controller (see TAMO below). The structure relaxes toward a daily profile, and RH is always derived from W at the simulated temperature.
 - Vapor above saturation condenses and is tracked. Every flow goes into a ledger, and the tests check mass conservation to 1e-6 kg.
 
-The six strategies are 24/7, daytime, nighttime, dew-point controlled (the engine with the Maximum Drying profile), efficiency optimized (the engine with your profile) and off. All of them run under identical conditions.
+The ten strategies are 24/7, daytime, nighttime, dew-point controlled (the engine with the Maximum Drying profile), efficiency optimized (the engine with your profile), TAMO, TAMO with forecast, aggressive drying (TAMO, Maximum Drying weights), temperature preservation (TAMO, Temperature Preservation weights) and off. All run under identical conditions, and the simulated controller decides every 5 minutes. TAMO with forecast sees the scenario's own future weather, so it is a retrospective **upper bound**. Results include temperature outcomes: mean, minimum, standard deviation, hours outside the preferred range, hours below the minimum and the largest fan-caused temperature change.
 
 **Climate profiles.** Five built-in New Orleans profiles: typical summer, very humid summer, a 3-day summer dry-air intrusion, fall and winter. They are **synthetic and illustrative**, not NOAA observations or normals, and the app labels them that way. You can also paste a custom hourly CSV or use the app's own recorded outdoor history. `examples/synthetic_nola_summer_day.csv` is a sample file, also labeled synthetic.
 
@@ -114,6 +114,88 @@ The six strategies are 24/7, daytime, nighttime, dew-point controlled (the engin
 1. **Moisture-removal opportunity:** vapor the exchanged air could carry (modeled).
 2. **Actual basement improvement:** what the measured RH does, which concrete, wood and leaks can overwhelm.
 3. **Energy efficiency:** gallons per kWh, including the assumed conditioned-air loss.
+
+
+## Temperature-aware moisture optimization (TAMO)
+
+TAMO is an optional second control policy inside the same decision engine. It still dries the basement, but it also weighs what the incoming air does to basement temperature. There is one engine, one psychrometric library and one thermal model. The policy only changes how the benefit and costs are weighed.
+
+**Which controller is in charge.** `control.policy` is `moisture` (the original logic, the default) or `tamo`. The policy that is not in charge runs in **shadow mode** every tick. It records what it would have done (`SHADOW_AGREE` / `SHADOW_DISAGREE` events and a `shadow_on` history column) and never switches anything. The Dashboard shows which controller is commanding and what the shadow would do. One click switches between them, which is also the rollback. The History page shows how often they agreed.
+
+### One coupled model for live control and simulation
+
+`coupled.py` is the only calculation library. The live engine, the simulator and the mock basement all call it. Its state is basement air temperature, structure temperature (slab, masonry, joists; not measured), humidity ratio W and the water held in the materials buffer. Each step:
+
+1. dry-air exchange: fan outdoor path, fan upstairs path, natural infiltration
+2. water vapor carried with that air, by humidity ratio (never by RH)
+3. moisture sources and the materials buffer
+4. new W
+5. new air and structure temperatures (two-node model, solved exactly)
+6. condensation of any vapor above saturation
+7. RH and dew point derived from the resulting temperature and W
+
+For every decision the engine runs this forward with fans ON and fans OFF for 15, 30, 60 and 120 minutes, holding outdoor conditions constant. Drying benefit, condensation risk and the temperature penalty are all scored on those **predicted** states. So cold, dry air shows both effects at once: the temperature drop (RH up) and the lower moisture content (RH down). The engine does not reject cold air for its cooling effect while ignoring that it is also removing water.
+
+**Thermal model.** Two heat capacities: the air plus fast contents, and the structure.
+
+```
+C_a dT_a/dt = G (T_in − T_a) + H (T_m − T_a)
+C_m dT_m/dt = H (T_a − T_m) + K (T_eq − T_m)
+```
+
+`G` is incoming dry-air mass flow × c_p, `H` the air-to-structure coupling, `K = C_m / τ`. A single first-order model can't show the quick air drop during a cold run followed by the rebound when fans stop, so two nodes are used. Defaults for a 24,000 ft³ basement: H = 2,000 W/K, C_m = 40 MJ/K, τ = 12 h, scaled with volume. These are **assumptions** (±50 %) until learning replaces them.
+
+**Learning.** Every 6 hours, and on demand from the History page, the app fits H to recorded fan starts with at least 8 °F between basement and incoming air. Confidence is low with fewer than 3 cycles, medium at 3 or more with ±50 %, high at 8 or more with ±25 %. By default a learned value is used only at high confidence. Each fan start also records a prediction that is checked 30 minutes later. If observed cooling exceeds the conservative prediction, or the average error is over 1 °F, the model's uncertainty is raised and a re-fit is triggered.
+
+### Utility, in drying-equivalent grams per hour
+
+All terms share one unit, grams of water per hour, so they can be compared:
+
+```
+utility = benefit − thermal penalty − energy penalty − condensation risk − switching cost
+
+benefit  = U × (½ · water removed + ½ · RH relief)            only if water removed > 0
+           RH relief = (RH_off − RH_on at the horizon) × dW/d%RH × dry-air mass ÷ hours
+thermal  = k_eff × [ max(0, Δd)^n × (1 + d_on / soft tolerance)
+                     + swing weight × max(0, |ΔT| − tolerance)^n ]
+           d = distance outside the preferred range, Δd = d_on − d_off at the horizon
+           moving toward the preferred range earns a credit, capped at half the benefit
+k_eff    = k (low 1,000 / medium 3,000 / high 8,000) × profile multiplier × (1 − 0.8·U)
+energy   = (fan W + HVAC W to replace conditioned air) × your profile's efficiency threshold in g/kWh (0 for Maximum Drying)
+risk     = weight × increase in max(0, 5 °F − predicted surface margin)²
+U        = smoothstep from 50 % RH (0) to 70 % RH (1)
+```
+
+Profile multipliers: Maximum Drying 0.4, Balanced and Energy Saver 1, Temperature Preservation 2.5. Fans start at utility ≥ 150 and stop below 0. A humidity-ratio advantage is also needed: 0.6 g/kg to start, 0.25 g/kg to keep running. The weights are **heuristics**, labeled as such on the Dashboard. Water removed, predictions and HVAC cost are labeled estimated. Temperatures, RH and fan state are labeled measured.
+
+### Hard limits (both policies)
+
+These block or stop the fans regardless of utility and minimum run times:
+
+- **Minimum basement temperature** (55 °F by default), checked with a *conservative* prediction: thermal parameters pushed toward a bigger temperature drop by their uncertainty, at the decision horizon plus one decision interval (at least 60 minutes while confidence is low).
+- **Pipe freeze.** A sensor with role `pipe` blocks cold-air runs below the freeze warning (40 °F) plus the sensor margin. Without one, the Dashboard says pipes near vents aren't monitored, and the min-temperature limit only protects the basement air on average.
+- **Surface condensation:** the original outdoor-dew-point check, plus a block when the predicted basement dew point would reach the coldest surface.
+
+If RH stays above 70 % for 3 hours and no safe drying exists, the app raises an alert that recommends a dehumidifier.
+
+### Forecast (optional)
+
+When enabled, the app fetches a 2-day hourly forecast from Open-Meteo (no account) every 30 minutes and ignores data older than 3 hours. Without internet it uses live sensors only. If a window within 4 hours offers at least 25 % more utility (and at least 50 g/h more), a start can be deferred, but never longer than 120 minutes, never when urgency is ≥ 0.6, and never by stopping a fan that is already running. Mock hardware uses the mock world's own weather, labeled mock.
+
+### Reason codes and opportunity
+
+Each decision carries a list of structured reasons, primary first. Examples: `MOISTURE_BENEFIT_POSITIVE`, `HUMIDITY_URGENCY_HIGH`, `THERMAL_PENALTY_TOO_HIGH`, `EFFICIENCY_TOO_LOW`, `PREDICTED_MIN_TEMP_BREACH`, `LOCALIZED_FREEZE_RISK`, `BETTER_FORECAST_WINDOW`, `RH_RISES_DURING_DRYING`. The opportunity indicator is excellent, good, marginal, unfavorable or unsafe. It is never better than unsafe while a hard limit blocks.
+
+### RH can rise while drying
+
+Cooling raises RH without adding water. The Dashboard splits each recent RH change into the part from moisture content and the part from temperature, and TAMO flags `RH_RISES_DURING_DRYING` when a run lowers W but leaves RH higher. Material-risk urgency still uses the actual RH, because surfaces respond to RH, not W.
+
+### Limitations
+
+- Predictions hold outdoor conditions constant over the horizon and use a lumped structure. Sun, upstairs HVAC cycles and occupants aren't modeled.
+- The structure temperature is estimated from a quasi-steady balance, not measured. A surface or pipe sensor improves safety more than any parameter tuning.
+- The utility weights are judgement, not physics. Shadow mode exists so you can compare both controllers on your basement before switching.
+- The V2 specification text received was cut off in section 29.B ("Relative humidity can increase during effective drying …"). Anything after that point wasn't implemented.
 
 ---
 
@@ -194,10 +276,14 @@ backend/ventctl/
   engine.py       pure decision engine (no I/O): modes, safety, hysteresis, explanations
   sensors.py      readings, validation, calibration, zone aggregation
   controller.py   runtime loop, switching, verification, fail-safes, alerts, history
-  simulation.py   dynamic moisture model + six strategies + insights
+  coupled.py      coupled temperature-moisture model shared by engine, simulator and mock
+  thermal.py      two-node air/structure thermal model (exact solution)
+  tamo.py         temperature-aware utility, urgency, predictions, opportunity, forecast choice
+  forecast.py     optional Open-Meteo forecast with cache and expiry
+  simulation.py   dynamic model + ten strategies + insights
   climate.py      synthetic profiles, CSV import
   analysis.py     statistics, Level 1 replay, recorded profiles
-  calibration.py  least-squares fit of air changes and fan CFM
+  calibration.py  least-squares fit of air changes and fan CFM; thermal coupling fit
   weather.py      NOAA global-hourly download, parsing, cache
   reports.py      seasonal report and annual estimate
   storage.py      SQLite schema + migrations
@@ -230,6 +316,8 @@ deploy/           macOS LaunchAgent
 | hardware | `test_hardware.py` (Ecowitt poll/push parsing, Shelly, Home Assistant, Tapo auto-off and re-arm, watchdog when controller stops) |
 | phase 3–4 | `test_calibration.py`, `test_phase4.py` (NOAA parsing and gaps, seasonal and annual reports, API) |
 | units | `test_psychro.py` (ASHRAE table values, dew point, humidity ratio, conversions, calibration) |
+| TAMO 1–12 | `test_tamo.py::test_s1_…` to `test_s12_…` (plus s4b, s8b, s11b) |
+| TAMO physics | `test_tamo.py`: coupled credit for drying despite cooling, shared model, continuity and monotonicity, hysteresis, pipe freeze, shadow mode, thermal learning, pressure and elevation, subfreezing, zero airflow, imperial formula, 1.08 rule, two-node energy balance |
 
 ## Not yet tested on real hardware
 

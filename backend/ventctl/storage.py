@@ -61,6 +61,32 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (source, station, ts)
     );
     """,
+    # 3: temperature-aware optimization telemetry, thermal predictions, simulation runs (additive only)
+    """
+    ALTER TABLE history ADD COLUMN policy TEXT;               -- control policy commanding the fans
+    ALTER TABLE history ADD COLUMN utility_g_h REAL;          -- TAMO net utility (drying-equivalent g/h)
+    ALTER TABLE history ADD COLUMN urgency REAL;
+    ALTER TABLE history ADD COLUMN thermal_penalty_g_h REAL;
+    ALTER TABLE history ADD COLUMN energy_penalty_g_h REAL;
+    ALTER TABLE history ADD COLUMN pred_fan_dt_f REAL;        -- predicted fan-caused temperature change at horizon
+    ALTER TABLE history ADD COLUMN shadow_on INTEGER;         -- what the policy not in control would do
+    ALTER TABLE history ADD COLUMN opportunity TEXT;
+    ALTER TABLE history ADD COLUMN pipe_t_c REAL;
+    CREATE TABLE thermal_predictions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts_start TEXT NOT NULL, ts_due TEXT NOT NULL, group_id TEXT NOT NULL,
+        horizon_min REAL, start_t_c REAL, inlet_t_c REAL,
+        predicted_c REAL, predicted_conservative_c REAL,
+        observed_c REAL, error_f REAL,
+        model_version TEXT, confidence TEXT, params TEXT
+    );
+    CREATE INDEX idx_thermal_pred_ts ON thermal_predictions(ts_start);
+    CREATE TABLE simulation_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT NOT NULL, version TEXT NOT NULL, profile TEXT, source TEXT,
+        strategies TEXT, params TEXT, summary TEXT
+    );
+    """,
 ]
 
 
@@ -103,6 +129,60 @@ class Storage:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
                 (config.model_dump_json(), _iso(datetime.now(timezone.utc))))
             self.db.commit()
+
+    # ---------------------------------------------------------------- key/value (model parameters etc.)
+    def get_kv(self, key: str):
+        row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return json.loads(row["value"]) if row else None
+
+    def set_kv(self, key: str, value) -> None:
+        with self._lock:
+            self.db.execute(
+                "INSERT INTO settings(key, value, updated_at) VALUES(?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (key, json.dumps(value, default=str), _iso(datetime.now(timezone.utc))))
+            self.db.commit()
+
+    # ---------------------------------------------------------------- thermal predictions
+    def add_thermal_prediction(self, row: dict) -> int:
+        cols = list(row)
+        vals = [_iso(v) if isinstance(v, datetime) else json.dumps(v) if isinstance(v, dict) else v
+                for v in row.values()]
+        with self._lock:
+            cur = self.db.execute(f"INSERT INTO thermal_predictions ({','.join(cols)}) VALUES "
+                                  f"({','.join('?' * len(cols))})", vals)
+            self.db.commit()
+            return cur.lastrowid
+
+    def resolve_thermal_prediction(self, pid: int, observed_c: float | None, error_f: float | None) -> None:
+        with self._lock:
+            self.db.execute("UPDATE thermal_predictions SET observed_c=?, error_f=? WHERE id=?",
+                            (observed_c, error_f, pid))
+            self.db.commit()
+
+    def thermal_predictions(self, limit: int = 50) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM thermal_predictions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------------------------------------------------------------- simulation runs
+    def add_simulation_run(self, version: str, profile: str, source: str, strategies: list[str], params: dict,
+                           summary: dict) -> None:
+        with self._lock:
+            self.db.execute("INSERT INTO simulation_runs (ts, version, profile, source, strategies, params, summary) "
+                            "VALUES (?,?,?,?,?,?,?)",
+                            (_iso(datetime.now(timezone.utc)), version, profile, source, json.dumps(strategies),
+                             json.dumps(params, default=str), json.dumps(summary, default=str)))
+            self.db.execute("DELETE FROM simulation_runs WHERE id NOT IN "
+                            "(SELECT id FROM simulation_runs ORDER BY id DESC LIMIT 200)")
+            self.db.commit()
+
+    def simulation_runs(self, limit: int = 20) -> list[dict]:
+        rows = self.db.execute("SELECT * FROM simulation_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        out = [dict(r) for r in rows]
+        for r in out:
+            for k in ("strategies", "params", "summary"):
+                r[k] = json.loads(r[k]) if r[k] else None
+        return out
 
     # ---------------------------------------------------------------- history
     def add_history(self, ts: datetime, row: dict) -> None:

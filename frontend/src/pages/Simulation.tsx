@@ -4,6 +4,8 @@ import { Card, TimeChart } from "../components";
 import { hours, useUnit } from "../units";
 
 const COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)", "var(--series-6)"];
+const color = (i: number) => COLORS[i % COLORS.length];
+const dashed = (i: number) => i >= COLORS.length;
 
 type FieldDef = [key: string, label: string, hint?: string, step?: number];
 const FIELDS: { title: string; fields: FieldDef[] }[] = [
@@ -18,13 +20,18 @@ const FIELDS: { title: string; fields: FieldDef[] }[] = [
     ["natural_ach", "Natural leakage (ACH)", "", 0.1],
     ["buffer_capacity_kg", "Wood/concrete buffer (kg)", "0 disables buffering"], ["buffer_tau_h", "Buffer time constant (h)"],
   ] },
+  { title: "Thermal (two-node model)", fields: [
+    ["coupling_w_k", "Air-to-structure coupling (W/K)", "blank = estimate from volume", 100],
+    ["structure_mj_k", "Structure heat capacity (MJ/K)", "blank = estimate from volume"],
+    ["structure_tau_h", "Structure relaxation to ground (h)"],
+  ] },
   { title: "Fans & cost", fields: [
     ["fan_count", "Number of fans"], ["fan_cfm", "Actual CFM per fan"], ["fan_w", "Watts per fan"],
     ["conditioned_air_fraction", "Upstairs air fraction (0-1)", "assumption", 0.05],
     ["electricity_cost_per_kwh", "Electricity ($/kWh)", "", 0.01],
   ] },
   { title: "Run", fields: [
-    ["duration_h", "Duration (hours)"], ["step_s", "Time step (s)"], ["start_hour", "Start hour (0-23)"],
+    ["duration_h", "Duration (hours)"], ["step_s", "Time step (s)"], ["decision_every_s", "Controller decides every (s)"], ["start_hour", "Start hour (0-23)"],
     ["dehumidifier_pints_day", "Dehumidifier (pints/day)"], ["dehumidifier_w", "Dehumidifier watts"], ["dehumidifier_setpoint_pct", "Dehumidifier setpoint (%)"],
   ] },
 ];
@@ -39,7 +46,7 @@ export default function Simulation() {
   const [preview, setPreview] = useState<Json>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
-  const [show, setShow] = useState<"rh" | "td">("rh");
+  const [show, setShow] = useState<"rh" | "td" | "t">("rh");
   const [wx, setWx] = useState<Json>(null);
   const [station, setStation] = useState("72231012916");
   const [wStart, setWStart] = useState("2025-07-01");
@@ -91,7 +98,8 @@ export default function Simulation() {
       result.results.forEach((r: Json) => {
         const p = r.series[i];
         if (!p) return;
-        row[r.id] = show === "rh" ? p.rh : (u === "F" ? p.td_f : (p.td_f - 32) * 5 / 9);
+        const f = show === "td" ? p.td_f : p.t_f;
+        row[r.id] = show === "rh" ? p.rh : (u === "F" ? f : (f - 32) * 5 / 9);
       });
       return row;
     });
@@ -122,12 +130,15 @@ export default function Simulation() {
     return lowIsBest ? Math.min(...vals) : Math.max(...vals);
   };
 
+  const tf = (f: number | null | undefined) => (f == null ? "—" : `${(u === "F" ? f : (f - 32) * 5 / 9).toFixed(1)}°${u}`);
+  const dtf = (f: number | null | undefined) => (f == null ? "—" : `${(u === "F" ? f : f * 5 / 9).toFixed(1)}°${u}`);
   if (!params) return <Card>Loading…</Card>;
   return (
     <>
       <Card title="Scenario simulation" right={<span className="badge modeled">modeled</span>}>
-        <p className="note">Compares six strategies under identical conditions with a simplified moisture mass balance (1-minute steps).
-          Results depend on the assumed moisture sources, buffering and airflow. The strategy that removes the most moisture is not
+        <p className="note">Compares ten strategies under identical conditions with the same coupled temperature–moisture model the live
+          controller uses (air and structure temperatures, humidity ratio, materials buffer). Results depend on the assumed moisture sources,
+          buffering, airflow and thermal parameters. “TAMO + forecast” sees the scenario's own future weather, so it is an upper bound. The strategy that removes the most moisture is not
           necessarily the safest or cheapest.</p>
         <div className="form" style={{ marginTop: 12 }}>
           <div className="field">
@@ -191,7 +202,8 @@ export default function Simulation() {
               </div>
             </div>
           ))}
-          <p className="faint">Controller strategies (D, E) use the thresholds from Settings. D uses the Maximum Drying profile; E uses your energy profile.</p>
+          <p className="faint">Controller strategies use the thresholds from Settings. D uses the Maximum Drying profile; E and F use your energy profile;
+            H and I are TAMO with Maximum Drying and Temperature Preservation weights.</p>
         </details>
         <div className="row" style={{ marginTop: 12 }}>
           <button className="btn primary" onClick={run} disabled={busy}>{busy ? "Running…" : "Run simulation"}</button>
@@ -213,10 +225,11 @@ export default function Simulation() {
             </Card>
           )}
           <Card right={<div className="seg"><button className={show === "rh" ? "active" : ""} onClick={() => setShow("rh")}>RH</button>
-            <button className={show === "td" ? "active" : ""} onClick={() => setShow("td")}>Dew point</button></div>}>
-            <TimeChart title={show === "rh" ? "Basement RH by strategy" : "Basement dew point by strategy"} badge="modeled"
+            <button className={show === "td" ? "active" : ""} onClick={() => setShow("td")}>Dew point</button>
+            <button className={show === "t" ? "active" : ""} onClick={() => setShow("t")}>Temperature</button></div>}>
+            <TimeChart title={show === "rh" ? "Basement RH by strategy" : show === "td" ? "Basement dew point by strategy" : "Basement temperature by strategy"} badge="modeled"
               unit={show === "rh" ? "%" : `°${u}`} data={merged} xFormat={xf} height={300} digits={1}
-              series={[...result.results.map((r: Json, i: number) => ({ key: r.id, name: r.name, color: COLORS[i] })),
+              series={[...result.results.map((r: Json, i: number) => ({ key: r.id, name: r.name, color: color(i), dashed: dashed(i) })),
                 ...(show === "td" ? [{ key: "out_td", name: "Outdoor dew point", color: "var(--text-3)", dashed: true }] : [])]} />
             {identical.length > 0 && <p className="faint">Overlapping lines (identical results): {identical.join("; ")}.</p>}
           </Card>
@@ -228,6 +241,8 @@ export default function Simulation() {
                   <th className="num">&gt;60% RH</th><th className="num">&gt;70% RH</th><th className="num">Net moved by fans</th>
                   <th className="num">Runtime</th><th className="num">Starts</th><th className="num">Fan cost</th><th className="num">Cond. air lost</th>
                   <th className="num">Cond. air cost</th><th className="num">Dehum. water</th><th className="num">Condensation-risk h</th><th className="num">$/gal</th>
+                  <th className="num">Mean temp</th><th className="num">Min temp</th><th className="num">Temp std</th><th className="num">Outside preferred</th>
+                  <th className="num">Below min</th><th className="num">Max fan cooling</th>
                 </tr></thead>
                 <tbody>
                   {result.results.map((r: Json, i: number) => {
@@ -235,7 +250,7 @@ export default function Simulation() {
                     const hl = (k: string, low = true) => (s[k] != null && s[k] === best(k, low) ? { fontWeight: 700 } : undefined);
                     return (
                       <tr key={r.id}>
-                        <td><span className="legend"><span className="sw" style={{ background: COLORS[i] }} /></span>{r.name}<div className="faint">{r.description}</div></td>
+                        <td style={{ minWidth: 200 }}><span className="legend"><span className="sw" style={{ background: color(i) }} /></span>{r.name}<div className="faint">{r.description}</div></td>
                         <td className="num" style={hl("final_rh")}>{s.final_rh.toFixed(1)}%</td>
                         <td className="num" style={hl("mean_rh")}>{s.mean_rh.toFixed(1)}%</td>
                         <td className="num" style={hl("max_rh")}>{s.max_rh.toFixed(1)}%</td>
@@ -251,6 +266,12 @@ export default function Simulation() {
                         <td className="num">{result.params.dehumidifier ? `${(s.dehumidifier_removed_kg / 3.785).toFixed(2)} gal` : "—"}</td>
                         <td className={`num ${s.condensation_risk_hours > 0 ? "neg" : ""}`}>{hours(s.condensation_risk_hours)}</td>
                         <td className="num" style={hl("cost_per_gallon_removed")}>{s.cost_per_gallon_removed != null ? `$${s.cost_per_gallon_removed.toFixed(2)}` : "—"}</td>
+                        <td className="num">{tf(s.mean_temp_f)}</td>
+                        <td className="num">{tf(s.min_temp_f)}</td>
+                        <td className="num" style={hl("temp_std_f")}>{dtf(s.temp_std_f)}</td>
+                        <td className="num" style={hl("hours_outside_preferred")}>{hours(s.hours_outside_preferred)}</td>
+                        <td className={`num ${s.hours_below_min_temp > 0 ? "neg" : ""}`}>{hours(s.hours_below_min_temp)}</td>
+                        <td className="num">{s.max_fan_cooling_f != null ? dtf(s.max_fan_cooling_f) : "—"}</td>
                       </tr>
                     );
                   })}

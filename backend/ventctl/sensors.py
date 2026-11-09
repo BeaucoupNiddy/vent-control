@@ -84,6 +84,7 @@ def validate(
     now: datetime,
     stale_after_s: float,
     previous_ts: datetime | None = None,
+    default_pressure_kpa: float | None = None,
 ) -> ValidatedReading:
     if not mapping.enabled:
         return ValidatedReading(mapping, "disabled", None, message="Sensor disabled in settings")
@@ -93,7 +94,7 @@ def validate(
     age = (now - reading.ts).total_seconds()
     v = ValidatedReading(
         mapping, "ok", age,
-        pressure_kpa=reading.pressure_kpa, diff_pressure_pa=reading.diff_pressure_pa,
+        pressure_kpa=reading.pressure_kpa or default_pressure_kpa, diff_pressure_pa=reading.diff_pressure_pa,
         battery_low=reading.battery_low, signal=reading.signal, source=reading.source,
         duplicate=previous_ts is not None and reading.ts == previous_ts,
     )
@@ -123,8 +124,8 @@ def validate(
         return v
     v.temp_c = t
 
-    if mapping.role == SensorRole.SURFACE:
-        return v  # surface probes need temperature only
+    if mapping.role in (SensorRole.SURFACE, SensorRole.PIPE):
+        return v  # surface and pipe probes need temperature only
 
     if reading.rh_pct is None:
         v.status = "missing"
@@ -168,6 +169,12 @@ class Conditions:
     upstairs: AirState | None
     diff_pressure_pa: float | None
     zones: dict[str, dict] = field(default_factory=dict)
+    surfaces: list[dict] = field(default_factory=list)  # every valid surface probe {name, t_c}
+    pipe_c: float | None = None  # coldest pipe / vulnerable-spot sensor
+    pipe_label: str | None = None
+    pipe_sensors: int = 0  # configured pipe sensors (valid or not)
+    forecast: list | None = None  # [(datetime, AirState)] outdoor forecast, optional
+    forecast_age_h: float | None = None
 
 
 def aggregate_zones(airs: list[AirState], method: str) -> AirState:
@@ -228,6 +235,10 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
     else:
         surface_c = surface_source = surface_label = None
 
+    pipes_all = snapshot.by_role(SensorRole.PIPE)
+    pipes = [r for r in pipes_all if r.ok and r.temp_c is not None]
+    pipe = min(pipes, key=lambda r: r.temp_c) if pipes else None
+
     up = next((r.air() for r in snapshot.by_role(SensorRole.UPSTAIRS) if r.ok), None)
     dp = next((r.diff_pressure_pa for r in snapshot.by_role(SensorRole.PRESSURE) if r.ok), None)
 
@@ -236,6 +247,9 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
         outdoor=outdoor, outdoor_problem=outdoor_problem,
         surface_c=surface_c, surface_source=surface_source, surface_label=surface_label,
         upstairs=up, diff_pressure_pa=dp, zones=zones,
+        surfaces=[{"name": r.mapping.name, "t_c": r.temp_c} for r in surf],
+        pipe_c=pipe.temp_c if pipe else None, pipe_label=pipe.mapping.name if pipe else None,
+        pipe_sensors=len(pipes_all),
     )
 
 

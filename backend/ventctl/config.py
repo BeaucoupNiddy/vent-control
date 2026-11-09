@@ -24,7 +24,13 @@ class Mode(str, Enum):
 class EnergyProfile(str, Enum):
     MAX_DRYING = "max_drying"
     BALANCED = "balanced"
+    TEMPERATURE_PRESERVATION = "temperature_preservation"
     ENERGY_SAVER = "energy_saver"
+
+
+class ControlPolicy(str, Enum):
+    MOISTURE = "moisture"  # original moisture-only logic (kept for comparison and rollback)
+    TAMO = "tamo"  # temperature-aware moisture optimization
 
 
 class FanType(str, Enum):
@@ -35,7 +41,8 @@ class FanType(str, Enum):
 class SensorRole(str, Enum):
     OUTDOOR = "outdoor"
     BASEMENT = "basement"  # an indoor basement zone
-    SURFACE = "surface"  # concrete / wood / pipe surface temperature
+    SURFACE = "surface"  # concrete / wood / masonry surface temperature (condensation checks)
+    PIPE = "pipe"  # pipe or vulnerable spot near a vent (freeze protection)
     UPSTAIRS = "upstairs"  # conditioned living space
     PRESSURE = "pressure"  # basement-to-upstairs differential pressure
     IGNORE = "ignore"
@@ -109,6 +116,10 @@ class ControlSettings(BaseModel):
         False, description="Interlock: block exhaust-only ventilation (naturally vented gas appliance present)"
     )
     zone_aggregation: Literal["mean", "wettest"] = "wettest"
+    policy: ControlPolicy = Field(
+        ControlPolicy.MOISTURE,
+        description="Which decision logic commands the fans. The other one is evaluated in shadow mode.")
+    shadow_evaluation: bool = Field(True, description="Evaluate the policy that is not in control, without switching")
 
     @model_validator(mode="after")
     def _check(self) -> "ControlSettings":
@@ -117,6 +128,70 @@ class ControlSettings(BaseModel):
         if self.upper_rh_pct < self.target_rh_pct:
             raise ValueError("upper RH threshold must be >= target RH")
         return self
+
+
+class TemperatureSettings(BaseModel):
+    """Temperature-aware moisture optimization (TAMO). All defaults are starting suggestions."""
+
+    preferred_min_f: float = Field(65, ge=30, le=90)
+    preferred_max_f: float = Field(78, ge=35, le=100)
+    soft_tolerance_f: float = Field(5, gt=0, le=30, description="Penalty grows with distance outside the preferred band "
+                                                                "relative to this")
+    min_allowed_f: float = Field(55, ge=35, le=80, description="Hard limit: stop cold-air ventilation before the "
+                                                               "basement air reaches this. Not a freeze guarantee.")
+    freeze_warning_f: float = Field(40, ge=33, le=60, description="Hard limit for pipe/vulnerable-spot sensors")
+    sensor_margin_f: float = Field(0.5, ge=0, le=5, description="Sensor accuracy allowance on hard limits")
+    sensitivity: Literal["low", "medium", "high", "custom"] = "medium"
+    custom_sensitivity_g_h: float = Field(3000, ge=0, description="Penalty weight k when sensitivity is custom")
+    penalty_exponent: float = Field(2.0, ge=1.0, le=3.0)
+    change_tolerance_f: float = Field(1.0, ge=0, le=10, description="Predicted swing inside the band that costs nothing")
+    swing_weight: float = Field(0.5, ge=0, le=5, description="Weight of swings that stay inside the preferred band")
+    horizon_min: float = Field(30, ge=5, le=240, description="Decision horizon for thermal predictions")
+    urgency_enabled: bool = True
+    urgency_low_rh_pct: float = Field(50, ge=20, le=90, description="Urgency 0 at or below this RH")
+    urgency_high_rh_pct: float = Field(70, ge=25, le=100, description="Urgency 1 at or above this RH")
+    urgency_relaxation: float = Field(0.8, ge=0, le=1, description="Fraction of the thermal weight relaxed at urgency 1")
+    min_dw_start_g_kg: float = Field(0.6, ge=0, le=10, description="Humidity-ratio advantage needed to start "
+                                                                  "(basement minus inlet air)")
+    min_dw_stop_g_kg: float = Field(0.25, ge=0, le=10, description="Fans stop below this humidity-ratio advantage")
+    utility_start_g_h: float = Field(150, ge=0, description="Net utility needed to start the fans")
+    utility_stop_g_h: float = Field(0, description="Fans stop when net utility falls below this")
+    switch_cost_g_h: float = Field(25, ge=0, description="Small penalty for changing fan state")
+    risk_weight_g_h: float = Field(200, ge=0, description="Soft penalty per °F² inside the condensation caution band")
+    condensation_caution_f: float = Field(5, ge=0, le=20)
+    condensation_concern_f: float = Field(2, ge=0, le=20)
+    learning_enabled: bool = True
+    learning_confidence: Literal["conservative", "standard"] = Field(
+        "conservative", description="conservative: use a learned thermal model only at high confidence")
+    # thermal model assumptions (used until learning replaces them)
+    air_structure_coupling_w_k: float | None = Field(None, gt=0, description="Heat exchange between air and structure; "
+                                                                           "blank = estimate from volume")
+    structure_heat_capacity_mj_k: float | None = Field(None, gt=0, description="Blank = estimate from volume")
+    structure_tau_h: float = Field(12, gt=0.5, le=240)
+    forecast_enabled: bool = Field(True, description="Uses a forecast only if one can be fetched; never required")
+    forecast_latitude: float = Field(29.95, ge=-90, le=90)
+    forecast_longitude: float = Field(-90.07, ge=-180, le=180)
+    forecast_horizon_h: float = Field(4, ge=1, le=12)
+    max_deferral_min: float = Field(120, ge=0, le=720)
+    forecast_max_urgency: float = Field(0.6, ge=0, le=1, description="Never defer above this urgency")
+
+    @model_validator(mode="after")
+    def _check(self) -> "TemperatureSettings":
+        if self.preferred_max_f <= self.preferred_min_f:
+            raise ValueError("preferred maximum temperature must be above the minimum")
+        if self.min_allowed_f >= self.preferred_min_f:
+            raise ValueError("minimum allowed temperature must be below the preferred minimum")
+        if self.urgency_high_rh_pct <= self.urgency_low_rh_pct:
+            raise ValueError("urgency high RH must be above urgency low RH")
+        if self.utility_stop_g_h > self.utility_start_g_h:
+            raise ValueError("utility stop threshold must not exceed the start threshold")
+        if self.min_dw_stop_g_kg > self.min_dw_start_g_kg:
+            raise ValueError("humidity-ratio stop threshold must not exceed the start threshold")
+        return self
+
+    @property
+    def k_g_h(self) -> float:
+        return {"low": 1000.0, "medium": 3000.0, "high": 8000.0}.get(self.sensitivity, self.custom_sensitivity_g_h)
 
 
 class HouseSettings(BaseModel):
@@ -130,6 +205,20 @@ class HouseSettings(BaseModel):
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
     natural_ach: float = Field(0.3, ge=0, le=10, description="Natural air changes per hour (simulation)")
     basement_volume_ft3: float = Field(24000, gt=100, le=500000, description="Air volume of the basement")
+    moisture_source_pints_day: float = Field(6, ge=0, le=500, description="Assumed internal moisture sources "
+                                                                          "(damp slab, intrusion); used in predictions")
+    moisture_buffer_kg: float = Field(25, ge=0, le=5000, description="Assumed water the materials exchange between "
+                                                                    "0% and 100% RH (0 = off)")
+    moisture_buffer_tau_h: float = Field(12, gt=0.1, le=500)
+    elevation_ft: float = Field(0, ge=-500, le=15000, description="Sets standard pressure when no barometer is read")
+    site_pressure_kpa: float | None = Field(None, ge=50, le=110, description="Fixed pressure override (blank = from "
+                                                                            "barometer or elevation)")
+
+    def default_pressure_kpa(self) -> float:
+        if self.site_pressure_kpa:
+            return self.site_pressure_kpa
+        z = self.elevation_ft * 0.3048
+        return 101.325 * (1 - 2.25577e-5 * z) ** 5.2559  # ASHRAE Fundamentals eq. 3
 
 
 class Dehumidifier(BaseModel):
@@ -203,6 +292,7 @@ class SystemSettings(BaseModel):
 class AppConfig(BaseModel):
     mode: Mode = Mode.AUTO
     control: ControlSettings = Field(default_factory=ControlSettings)
+    temperature: TemperatureSettings = Field(default_factory=TemperatureSettings)
     house: HouseSettings = Field(default_factory=HouseSettings)
     fans: list[Fan] = Field(default_factory=list)
     groups: list[FanGroup] = Field(default_factory=lambda: [FanGroup(id="main", name="Basement")])

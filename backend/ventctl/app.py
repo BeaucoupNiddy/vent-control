@@ -20,8 +20,9 @@ from pydantic import BaseModel, ValidationError
 
 from . import analysis, calibration, climate, reports, simulation, weather
 from .clock import AcceleratedClock, Clock, ManualClock
-from .config import AppConfig, Mode, ShellyDevice, example_config
+from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
+from .forecast import ForecastCache, MockForecast, OpenMeteoForecast
 from .hardware import factory
 from .hardware.base import HardwareError
 from .hardware.ecowitt import EcowittSource
@@ -101,6 +102,10 @@ class AnnualRequest(BaseModel):
     use_observed: bool = True
 
 
+class PolicyRequest(BaseModel):
+    policy: ControlPolicy
+
+
 class CalcRequest(BaseModel):
     t_f: float
     rh_pct: float
@@ -143,7 +148,8 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         bclock = ManualClock(start)
         clock = ProxyClock(bclock)
         sensors, switches, world = factory.build(cfg, clock, None, start)
-        ctrl = Controller(cfg, storage, sensors, switches, clock, data_source=factory.data_source(cfg))
+        ctrl = Controller(cfg, storage, sensors, switches, clock, data_source=factory.data_source(cfg),
+                          forecast=ForecastCache(MockForecast(world) if world else OpenMeteoForecast()))
         await ctrl.startup()
         if start < now:
             log.info("Backfilling %.0f h of mock history", backfill_hours)
@@ -197,6 +203,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             c.sensors, c.switches = sensors, switches
             c.data_source = factory.data_source(new)
             state["world"] = world
+            c.forecast = ForecastCache(MockForecast(world) if world else OpenMeteoForecast())
             c.storage.add_event(c.clock.now(), "config", "warning",
                                 f"Hardware adapters changed: sensors={new.sensors.provider}, switches={new.switches.provider}",
                                 "HARDWARE_CHANGE")
@@ -279,10 +286,17 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     @app.get("/api/sim/defaults")
     def sim_defaults():
         c = ctrl().config
+        tp = ctrl().thermal_params()
         p = simulation.SimParams(conditioned_air_fraction=c.house.conditioned_air_fraction,
                                  electricity_cost_per_kwh=c.house.electricity_cost_per_kwh,
                                  natural_ach=c.house.natural_ach,
-                                 volume_ft3=c.house.basement_volume_ft3)
+                                 volume_ft3=c.house.basement_volume_ft3,
+                                 moisture_source_pints_day=c.house.moisture_source_pints_day,
+                                 buffer_capacity_kg=c.house.moisture_buffer_kg,
+                                 buffer_tau_h=c.house.moisture_buffer_tau_h,
+                                 coupling_w_k=tp.coupling_w_k if tp.source != "assumed" else None,
+                                 structure_mj_k=c.temperature.structure_heat_capacity_mj_k,
+                                 structure_tau_h=c.temperature.structure_tau_h)
         fans = [f for f in c.fans if f.enabled]
         if fans:
             p.fan_count = len(fans)
@@ -310,7 +324,44 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(404, "unknown profile")
         except ValueError as e:
             raise HTTPException(400, str(e))
-        return simulation.compare(req.params, prof, ctrl().config, req.strategies)
+        res = simulation.compare(req.params, prof, ctrl().config, req.strategies)
+        try:
+            state["storage"].add_simulation_run(
+                simulation.SIM_VERSION, prof.name, prof.source, [r["id"] for r in res["results"]],
+                req.params.model_dump(), {r["id"]: r["summary"] for r in res["results"]})
+        except Exception:  # persistence problems must not lose the result
+            log.exception("could not store simulation run")
+        return res
+
+    @app.get("/api/sim/runs")
+    def sim_runs(limit: int = 20):
+        return state["storage"].simulation_runs(limit)
+
+    # ---------------------------------------------------------------- temperature-aware optimization
+    @app.post("/api/policy")
+    def set_policy(req: PolicyRequest):
+        ctrl().set_policy(req.policy)
+        return {"policy": ctrl().config.control.policy.value}
+
+    @app.get("/api/shadow")
+    def shadow(range: str = "7d", start: str | None = None, end: str | None = None):
+        s, e = analysis.range_for(range, ctrl().clock.now(), start, end)
+        return analysis.shadow_agreement(state["storage"].history(s, e, 10**7))
+
+    @app.get("/api/thermal")
+    def thermal_model():
+        c = ctrl()
+        return {"params": c.thermal_params().to_dict(), "learned": c.thermal_learned,
+                "predictions": state["storage"].thermal_predictions(50)}
+
+    @app.post("/api/thermal/fit")
+    def thermal_fit():
+        return ctrl().refit_thermal()
+
+    @app.get("/api/forecast")
+    def forecast_status():
+        c = ctrl()
+        return c.forecast.status(c.clock.now(), c.config) if c.forecast else {"enabled": False}
 
     @app.post("/api/replay")
     def run_replay(req: ReplayRequest):

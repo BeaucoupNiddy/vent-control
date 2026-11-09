@@ -47,6 +47,12 @@ export const api = {
   seasonal: (range: string) => req("GET", `/api/reports/seasonal?range=${range}`),
   annual: (body: Json) => req("POST", "/api/reports/annual", body),
   calc: (t_f: number, rh_pct: number) => req("POST", "/api/calc", { t_f, rh_pct }),
+  setPolicy: (policy: string) => req("POST", "/api/policy", { policy }),
+  shadow: (range = "7d") => req("GET", `/api/shadow?range=${range}`),
+  thermal: () => req("GET", "/api/thermal"),
+  thermalFit: () => req("POST", "/api/thermal/fit"),
+  forecast: () => req("GET", "/api/forecast"),
+  simRuns: () => req("GET", "/api/sim/runs"),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),

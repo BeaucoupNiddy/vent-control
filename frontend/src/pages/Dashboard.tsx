@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card, Icon, Stat } from "../components";
+import TamoPanel, { ControllerLine, OpportunityBadge, ReasonList } from "./Tamo";
 import { deltaTemp, duration, hours, localTime, moisture, num, pct, temp, useUnit } from "../units";
 
 const MODES = [
@@ -92,6 +93,8 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
           </div>
         ))}
       </Card>
+
+      <TamoPanel status={status} refresh={refresh} />
 
       <div className="grid g3">
         <Card title="Basement" right={<span className="faint">{m.indoor_label}</span>}>
@@ -216,14 +219,17 @@ function GroupDecision({ g, status }: { g: Json; status: Json }) {
             <span className="badge">{status.mode.replace("_", " ").toUpperCase()}</span>
             {status.simulation_mode && <span className="badge mock">no physical commands</span>}
             {!g?.verified && <span className="badge crit">switch state unverified</span>}
+            <OpportunityBadge value={d?.opportunity} />
             {g?.maintenance && <span className="badge crit">maintenance: interlocks bypassed</span>}
           </div>
           <p className="explain">{d?.explanation}</p>
+          <ControllerLine g={g} status={status} />
+          <ReasonList d={d} />
           <div className="row faint">
             {g?.last_change && <span>Last switched {localTime(g.last_change, true)}</span>}
             {d?.next_eligible_switch && <span>· Next eligible switch {localTime(d.next_eligible_switch)}</span>}
             {g?.manual_until && <span>· Manual override ends {localTime(g.manual_until)}</span>}
-            <span>· Profile: {status.energy_profile.replace("_", " ")}</span>
+            <span>· Profile: {status.energy_profile.replace(/_/g, " ")}</span>
           </div>
           {d?.warnings?.map((w: string) => <p key={w} className="note" style={{ marginBottom: 0 }}>{w}</p>)}
         </div>

@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { api, Json } from "../api";
 import { Card, Stat, TimeChart, fanIntervals } from "../components";
-import { hours, pct, tempVal, useUnit } from "../units";
+import { hours, num, pct, tempVal, useUnit } from "../units";
+import { POLICY_NAMES } from "./Tamo";
 
 const RANGES = [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["custom", "Custom"]];
 
@@ -14,6 +15,14 @@ export default function History() {
   const [stats, setStats] = useState<Json>(null);
   const [replay, setReplay] = useState<Json>(null);
   const [err, setErr] = useState("");
+  const [shadow, setShadow] = useState<Json>(null);
+  const [therm, setTherm] = useState<Json>(null);
+  const [cfgT, setCfgT] = useState<Json>(null);
+  const [fitMsg, setFitMsg] = useState("");
+  useEffect(() => {
+    api.thermal().then(setTherm).catch(() => {});
+    api.config().then((c) => setCfgT(c.temperature)).catch(() => {});
+  }, []);
 
   const custom = range === "custom";
   const iso = (s: string) => (s ? new Date(s).toISOString() : undefined);
@@ -24,6 +33,7 @@ export default function History() {
     const s = custom ? iso(start) : undefined, e = custom ? iso(end) : undefined;
     api.history(range, s, e).then(setData).catch((x) => setErr(String(x.message)));
     api.stats(range, s, e).then(setStats).catch(() => {});
+    if (!custom) api.shadow(range).then(setShadow).catch(() => {});
     setReplay(null);
   }, [range, start, end, custom]);
 
@@ -41,6 +51,10 @@ export default function History() {
       removal: r.fans_on > 0 ? (r.removal_g_h * 24) / 3785.4 : 0,
       potential: r.potential_removal_g_h != null ? (r.potential_removal_g_h * 24) / 3785.4 : null,
       power: r.power_w,
+      util: r.utility_g_h, therm_pen: r.thermal_penalty_g_h != null ? -r.thermal_penalty_g_h : null,
+      energy_pen: r.energy_penalty_g_h != null ? -r.energy_penalty_g_h : null,
+      fan_dt: r.pred_fan_dt_f != null ? (u === "F" ? r.pred_fan_dt_f : r.pred_fan_dt_f * 5 / 9) : null,
+      pipe: tempVal(r.pipe_t_c, u),
       ...z,
     };
   }), [data, u]);
@@ -57,6 +71,16 @@ export default function History() {
   const T = `°${u}`;
   const zoneColors = ["var(--series-1)", "var(--series-3)", "var(--series-4)", "var(--series-5)"];
   const src = data?.rows?.[0]?.source;
+
+  const f2u = (f: number) => (u === "F" ? f : ((f - 32) * 5) / 9);
+  async function refit() {
+    setFitMsg("Fitting…");
+    try {
+      const r = await api.thermalFit();
+      setFitMsg(r.coupling_w_k ? `Fitted ${Math.round(r.coupling_w_k)} W/K from ${r.cycles_used} cycles (${r.confidence} confidence).` : r.note || "No informative cycles.");
+      setTherm(await api.thermal());
+    } catch (e) { setFitMsg(String((e as Error).message)); }
+  }
 
   async function runReplay() {
     try {
@@ -124,10 +148,70 @@ export default function History() {
               { key: "potential", name: "If fans ran", color: "var(--series-2)", dashed: true },
             ]} />
             <p className="faint">Positive = removal, negative = moisture addition.</p></Card>
+          <Card><TimeChart title="Thermal impact" unit={T} digits={2} data={rows} xFormat={xf} fanOn={fan}
+            band={cfgT ? { y1: f2u(cfgT.preferred_min_f), y2: f2u(cfgT.preferred_max_f), label: "Preferred range" } : undefined}
+            lines={cfgT ? [{ y: f2u(cfgT.min_allowed_f), label: "Minimum allowed", tone: "crit" }] : undefined}
+            series={[
+              { key: "in_t", name: "Basement", color: "var(--series-1)" },
+              { key: "pipe", name: "Pipe sensor", color: "var(--series-5)" },
+            ]} />
+            <p className="faint">Shaded band: preferred range from Settings. Fan intervals shaded blue.</p></Card>
+          <Card><TimeChart title="Drying vs temperature tradeoff" badge="modeled" unit="g/h" data={rows} xFormat={xf} fanOn={fan} zeroLine digits={0}
+            series={[
+              { key: "util", name: "Net utility", color: "var(--series-1)" },
+              { key: "therm_pen", name: "Thermal penalty", color: "var(--series-2)", dashed: true },
+              { key: "energy_pen", name: "Energy penalty", color: "var(--series-4)", dashed: true },
+            ]} />
+            <p className="faint">TAMO's evaluation at each record, in drying-equivalent grams per hour. Penalties are drawn below zero.</p></Card>
+          <Card><TimeChart title="Predicted fan effect on temperature" badge="modeled" unit={T} data={rows} xFormat={xf} fanOn={fan} zeroLine digits={2}
+            series={[{ key: "fan_dt", name: "Fan effect at horizon", color: "var(--series-3)" }]} /></Card>
           <Card><TimeChart title="Fan power" badge={src === "mock" ? "mock" : undefined} unit="W" data={rows} xFormat={xf} fanOn={fan} digits={0}
             series={[{ key: "power", name: "Power", color: "var(--series-1)" }]} /></Card>
         </div>
       )}
+
+      <div className="grid g2">
+        <Card title="Shadow comparison" right={<span className="badge modeled">recorded decisions</span>}>
+          {!shadow || !shadow.hours_compared ? <p className="muted">No shadow decisions recorded in this range.</p> : (
+            <dl className="kv">
+              <dt>Agreement between controllers</dt><dd>{pct(shadow.agreement_pct, 1)} of {hours(shadow.hours_compared)}</dd>
+              <dt>Runtime of the controller in charge</dt><dd>{hours(shadow.runtime_in_control_h)}</dd>
+              <dt>Runtime the shadow would have used</dt><dd>{hours(shadow.runtime_shadow_h)}</dd>
+              {Object.entries(shadow.hours_by_policy || {}).map(([k, v]) => (
+                <Fragment key={k}><dt>Hours commanded by {POLICY_NAMES[k] || k}</dt><dd>{hours(v as number)}</dd></Fragment>
+              ))}
+            </dl>
+          )}
+        </Card>
+        <Card title="Thermal model" right={<button className="btn" onClick={refit}>Re-fit from fan cycles</button>}>
+          {therm && (<>
+            <dl className="kv">
+              <dt>In use</dt><dd>{therm.params.source} · confidence {therm.params.confidence} · ±{Math.round(therm.params.uncertainty * 100)}%</dd>
+              <dt>Air-to-structure coupling</dt><dd>{Math.round(therm.params.coupling_w_k)} W/K</dd>
+              <dt>Structure heat capacity</dt><dd>{num(therm.params.structure_heat_capacity_mj_k, 1)} MJ/K</dd>
+              <dt>Last fit</dt><dd>{therm.learned?.coupling_w_k
+                ? `${Math.round(therm.learned.coupling_w_k)} W/K (${Math.round(therm.learned.low_w_k)}–${Math.round(therm.learned.high_w_k)}), ${therm.learned.cycles_used} cycles, ${therm.learned.confidence}`
+                : `not enough data (${therm.learned?.cycles_found ?? 0} cycles found)`}</dd>
+            </dl>
+            {therm.predictions?.length > 0 && (
+              <div className="table-wrap"><table>
+                <thead><tr><th>Fan start</th><th className="num">Predicted change</th><th className="num">Observed change</th><th className="num">Error</th></tr></thead>
+                <tbody>{therm.predictions.slice(0, 8).map((p: Json) => {
+                  const d = (c: number | null) => (c == null || p.start_t_c == null ? null : (c - p.start_t_c) * 1.8 * (u === "F" ? 1 : 5 / 9));
+                  const pr = d(p.predicted_c), ob = d(p.observed_c);
+                  return (
+                    <tr key={p.id}><td>{new Date(p.ts_start).toLocaleString()} <span className="faint">({num(p.horizon_min, 0)} min)</span></td>
+                      <td className="num">{pr != null ? `${pr.toFixed(1)}°${u}` : "—"}</td>
+                      <td className="num">{ob != null ? `${ob.toFixed(1)}°${u}` : "pending"}</td>
+                      <td className="num">{p.error_f != null ? `${(p.error_f * (u === "F" ? 1 : 5 / 9)).toFixed(1)}°${u}` : "—"}</td></tr>
+                  );
+                })}</tbody>
+              </table></div>
+            )}
+          </>)}
+          {fitMsg && <p className="faint">{fitMsg}</p>}
+        </Card>
+      </div>
 
       <Card title="Historical replay (Level 1)" right={<button className="btn" onClick={runReplay} disabled={rows.length < 2}>Replay this range under each policy</button>}>
         <p className="note">Uses the recorded conditions to show how each control policy would have switched and how much moisture-transfer

@@ -30,15 +30,15 @@ from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
-from . import psychro
+from . import coupled, psychro, thermal
 from .airflow import ventilation_effect
 from .climate import ClimateProfile
-from .config import AppConfig, EnergyProfile, Fan, FanGroup, FanType, Mode
+from .config import AppConfig, ControlPolicy, EnergyProfile, Fan, FanGroup, FanType, Mode
 from .engine import GroupState, decide
 from .psychro import AirState
 from .sensors import Conditions
 from .units import (
-    M3_PER_FT3, c_to_f, cfm_to_m3s, delta_f_to_c, f_to_c, grams_to_gallons,
+    delta_c_to_f, M3_PER_FT3, c_to_f, cfm_to_m3s, delta_f_to_c, f_to_c, grams_to_gallons,
     pints_per_day_to_g_per_h,
 )
 
@@ -48,9 +48,10 @@ class SimParams(BaseModel):
     initial_temp_f: float = 79
     initial_rh_pct: float = Field(75, ge=5, le=100)
     basement_mean_temp_f: float | None = Field(None, description="Defaults to the profile's suggestion")
-    temp_variation_f: float = Field(1.0, ge=0, le=15, description="Daily +/- swing of basement temperature")
-    thermal_tau_h: float = Field(6, gt=0.1)
-    thermal_mass_factor: float = Field(30, ge=1, description="Effective heat capacity as a multiple of the air's")
+    temp_variation_f: float = Field(1.0, ge=0, le=15, description="Daily +/- swing of the structure's equilibrium")
+    coupling_w_k: float | None = Field(None, gt=0, description="Air-to-structure heat transfer; blank = estimate")
+    structure_mj_k: float | None = Field(None, gt=0, description="Structure heat capacity; blank = estimate")
+    structure_tau_h: float = Field(12, gt=0.5, le=240, description="Structure relaxation to ground/house")
     fan_count: int = Field(2, ge=0, le=20)
     fan_cfm: float = Field(110, gt=0, le=5000, description="Actual airflow per fan")
     fan_w: float = Field(20, ge=0)
@@ -69,6 +70,7 @@ class SimParams(BaseModel):
     dehumidifier_setpoint_pct: float = Field(50, ge=30, le=80)
     duration_h: float = Field(72, gt=0, le=24 * 31)
     step_s: float = Field(60, ge=10, le=600)
+    decision_every_s: float = Field(300, ge=10, le=3600, description="How often the simulated controller decides")
     start_hour: float = Field(0, ge=0, lt=24)
     day_hours: tuple[float, float] = (8, 20)
     night_hours: tuple[float, float] = (20, 8)
@@ -108,12 +110,26 @@ class BasementModel:
         self.m_da = vol * psychro.dry_air_density(self.t_c, self.w)
         self.mean_t_c = f_to_c(params.basement_mean_temp_f if params.basement_mean_temp_f is not None
                                else profile.basement_temp_f)
-        self.surface_c = f_to_c(params.surface_temp_f if params.surface_temp_f is not None
-                                else profile.surface_temp_f)
+        self.surface_base_c = f_to_c(params.surface_temp_f if params.surface_temp_f is not None
+                                     else profile.surface_temp_f)
         self.buffer_kg = params.buffer_capacity_kg * self.rh  # starts in equilibrium
+        self.tm_c = self.t_c
+        self.mp = coupled.ModelParams(
+            thermal.default_params(params.volume_ft3, params.coupling_w_k, params.structure_mj_k, params.structure_tau_h),
+            vol, params.natural_ach, pints_per_day_to_g_per_h(params.moisture_source_pints_day),
+            params.buffer_capacity_kg, params.buffer_tau_h)
         self.ledger = Ledger()
         self.dehum_on = False
         self.dehum_kwh = 0.0
+
+    @property
+    def surface_c(self) -> float:
+        """Coldest surface: follows the structure's departure from its equilibrium."""
+        return self.surface_base_c + (self.tm_c - self.mean_t_c)
+
+    @surface_c.setter
+    def surface_c(self, value: float) -> None:
+        self.surface_base_c = value - (self.tm_c - self.mean_t_c)
 
     @property
     def rh(self) -> float:
@@ -129,78 +145,46 @@ class BasementModel:
     def water_inventory(self) -> float:
         return self.m_da * self.w + self.buffer_kg
 
+    def t_eq_at(self, hour: float) -> float:
+        hour_angle = 2 * math.pi * (hour - 17) / 24  # basement lags outdoors
+        return self.mean_t_c + delta_f_to_c(self.p.temp_variation_f) * math.cos(hour_angle)
+
+    def state(self) -> coupled.State:
+        return coupled.State(self.t_c, self.tm_c, self.w, self.buffer_kg)
+
     def step(self, hour: float, dt_s: float, fans_on: list[Fan], outdoor: AirState | None = None) -> dict:
         p = self.p
         out = outdoor or self.outdoor_at(hour)
         ind = self.air()
         up = self.upstairs or AirState.from_t_rh(f_to_c(self.house.upstairs_temp_f), self.house.upstairs_rh_pct / 100)
+        eff = ventilation_effect(ind, out, fans_on, self.house, up) if fans_on else None
+        m_out, m_up = coupled.fan_flows(eff)
 
-        m_out = m_up = 0.0
-        eff = None
-        if fans_on:
-            eff = ventilation_effect(ind, out, fans_on, self.house, up)
-            total = eff.dry_air_kg_h / 3600
-            qsum = eff.outdoor_path_cfm + eff.upstairs_path_cfm
-            m_out = total * eff.outdoor_path_cfm / qsum if qsum else 0
-            m_up = total * eff.upstairs_path_cfm / qsum if qsum else 0
-        m_nat = p.natural_ach * self.volume_m3 / 3600 * psychro.dry_air_density(out.t_c, out.w)
-
-        d_fan_out = m_out * (out.w - self.w) * dt_s
-        d_fan_up = m_up * (up.w - self.w) * dt_s
-        d_inf = m_nat * (out.w - self.w) * dt_s
-        d_src = pints_per_day_to_g_per_h(p.moisture_source_pints_day) / 1000 / 3600 * dt_s
-
-        # dehumidifier with 2% deadband
+        # dehumidifier with 2% deadband; capacity derates at lower RH (rough: proportional to RH/60, capped)
         rh_now = self.rh * 100
         if p.dehumidifier:
             if rh_now > p.dehumidifier_setpoint_pct + 2:
                 self.dehum_on = True
             elif rh_now <= p.dehumidifier_setpoint_pct:
                 self.dehum_on = False
-        d_dh = 0.0
+        dh_g_h = 0.0
         if self.dehum_on:
-            # capacity derates at lower RH (rough: proportional to RH/60, capped)
-            rate = pints_per_day_to_g_per_h(p.dehumidifier_pints_day) / 1000 / 3600 * min(1.2, rh_now / 60)
-            d_dh = -rate * dt_s
+            dh_g_h = pints_per_day_to_g_per_h(p.dehumidifier_pints_day) * min(1.2, rh_now / 60)
             self.dehum_kwh += p.dehumidifier_w * dt_s / 3.6e6
 
-        # buffer exchange
-        d_buf = 0.0
-        if p.buffer_capacity_kg > 0:
-            flux = (self.buffer_kg - p.buffer_capacity_kg * min(self.rh, 1.0)) / (p.buffer_tau_h * 3600)
-            d_buf = flux * dt_s
-            self.buffer_kg -= d_buf
-
-        self.w += (d_fan_out + d_fan_up + d_inf + d_src + d_dh + d_buf) / self.m_da
-        self.w = max(self.w, 1e-6)
-
-        # temperature
-        hour_angle = 2 * math.pi * (hour - 17) / 24  # basement lags outdoors
-        t_prof = self.mean_t_c + delta_f_to_c(p.temp_variation_f) * math.cos(hour_angle)
-        dT = (t_prof - self.t_c) / (p.thermal_tau_h * 3600) * dt_s
-        m_air_in = m_out + m_nat
-        if m_air_in > 0:
-            c_eff = self.m_da * psychro.CP_DA * p.thermal_mass_factor
-            dT += m_air_in * psychro.CP_DA * (out.t_c - self.t_c) / c_eff * dt_s
-            if m_up > 0:
-                dT += m_up * psychro.CP_DA * (up.t_c - self.t_c) / c_eff * dt_s
-        self.t_c += dT
-
-        # condensation: vapor above saturation leaves the air
-        w_sat = psychro.humidity_ratio(self.t_c, 1.0)
-        d_cond = 0.0
-        if self.w > w_sat:
-            d_cond = -(self.w - w_sat) * self.m_da
-            self.w = w_sat
+        st = self.state()
+        bd = coupled.Boundary(out, up, m_out, m_up, self.t_eq_at(hour), dh_g_h)
+        r = coupled.advance(self.mp, st, bd, dt_s, self.m_da)
+        self.t_c, self.tm_c, self.w, self.buffer_kg = st.t_c, st.tm_c, st.w, st.buffer_kg
 
         L = self.ledger
-        L.fan_outdoor += d_fan_out
-        L.fan_upstairs += d_fan_up
-        L.infiltration += d_inf
-        L.sources += d_src
-        L.dehumidifier += d_dh
-        L.condensed += d_cond
-        return {"outdoor": out, "effect": eff, "fan_out_kg": d_fan_out, "fan_up_kg": d_fan_up, "m_up": m_up}
+        L.fan_outdoor += r.d_fan_out
+        L.fan_upstairs += r.d_fan_up
+        L.infiltration += r.d_inf
+        L.sources += r.d_src
+        L.dehumidifier += r.d_dh
+        L.condensed += r.d_cond
+        return {"outdoor": out, "effect": eff, "fan_out_kg": r.d_fan_out, "fan_up_kg": r.d_fan_up, "m_up": m_up}
 
 
 # ---------------------------------------------------------------- strategies
@@ -209,10 +193,37 @@ STRATEGIES = {
     "continuous": ("A. Continuous (24/7)", "Fans run all the time."),
     "daytime": ("B. Daytime only", "Fans run during the configured daytime hours."),
     "nighttime": ("C. Nighttime only", "Fans run during the configured nighttime hours."),
-    "dewpoint": ("D. Dew-point controlled", "Runs when moisture and safety thresholds permit (no efficiency minimum)."),
-    "optimized": ("E. Efficiency optimized", "Full decision logic incl. fan cost, conditioned-air loss and safety."),
-    "off": ("F. Ventilation off", "No forced ventilation; natural leakage and moisture sources still act."),
+    "dewpoint": ("D. Simple dew-point control", "Original moisture logic, Maximum Drying profile (no efficiency "
+                 "minimum)."),
+    "optimized": ("E. Moisture-optimized (original)", "Original moisture logic incl. fan cost, conditioned-air loss "
+                  "and safety."),
+    "tamo": ("F. Moisture + temperature", "Temperature-aware optimization with your energy profile."),
+    "tamo_forecast": ("G. Moisture + temperature + forecast", "As F, plus forecast deferral. Uses the scenario's "
+                      "own future weather as a perfect forecast: a retrospective upper bound."),
+    "aggressive": ("H. Aggressive drying", "Temperature-aware with the Maximum Drying profile (all hard limits "
+                   "kept)."),
+    "preserve": ("I. Temperature preservation", "Temperature-aware with the Temperature Preservation profile."),
+    "off": ("J. Ventilation off", "No forced ventilation; natural leakage and moisture sources still act."),
 }
+SIM_VERSION = "2.0-coupled"
+TAMO_STRATEGIES = {"tamo", "tamo_forecast", "aggressive", "preserve"}
+
+
+def strategy_config(base: AppConfig, strategy: str) -> AppConfig:
+    """Policy and profile for a controller strategy. Shared by the simulator and historical replay."""
+    cfg = base.model_copy(deep=True)
+    cfg.mode = Mode.SIMULATION
+    c = cfg.control
+    c.policy = ControlPolicy.TAMO if strategy in TAMO_STRATEGIES else ControlPolicy.MOISTURE
+    cfg.temperature.forecast_enabled = strategy == "tamo_forecast"
+    if strategy in ("dewpoint", "aggressive"):
+        c.energy_profile = EnergyProfile.MAX_DRYING
+    elif strategy == "preserve":
+        c.energy_profile = EnergyProfile.TEMPERATURE_PRESERVATION
+    elif strategy in ("optimized", "tamo", "tamo_forecast") and c.energy_profile in (
+            EnergyProfile.MAX_DRYING, EnergyProfile.TEMPERATURE_PRESERVATION):
+        c.energy_profile = EnergyProfile.BALANCED
+    return cfg
 
 
 def _in_window(h: float, win: tuple[float, float]) -> bool:
@@ -231,16 +242,18 @@ def sim_fans(params: SimParams) -> list[Fan]:
 
 
 def _sim_config(base: AppConfig, params: SimParams, fans: list[Fan], strategy: str) -> AppConfig:
-    cfg = base.model_copy(deep=True)
+    cfg = strategy_config(base, strategy)
     cfg.fans = fans
     cfg.groups = [FanGroup(id="main", name="Simulated")]
-    cfg.house.conditioned_air_fraction = params.conditioned_air_fraction
-    cfg.house.electricity_cost_per_kwh = params.electricity_cost_per_kwh
-    cfg.mode = Mode.SIMULATION
-    if strategy == "dewpoint":
-        cfg.control.energy_profile = EnergyProfile.MAX_DRYING
-    elif strategy == "optimized" and cfg.control.energy_profile == EnergyProfile.MAX_DRYING:
-        cfg.control.energy_profile = EnergyProfile.BALANCED
+    h = cfg.house
+    h.conditioned_air_fraction = params.conditioned_air_fraction
+    h.electricity_cost_per_kwh = params.electricity_cost_per_kwh
+    # the controller's predictions use the same physical assumptions as the simulated basement
+    h.basement_volume_ft3 = params.volume_ft3
+    h.natural_ach = params.natural_ach
+    h.moisture_source_pints_day = params.moisture_source_pints_day
+    h.moisture_buffer_kg = params.buffer_capacity_kg
+    h.moisture_buffer_tau_h = params.buffer_tau_h
     return cfg
 
 
@@ -271,6 +284,11 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
     state = GroupState(is_on=False, verified=True, last_change=None)
     margin_c = delta_f_to_c(cfg.control.surface_margin_f)
 
+    tcfg = cfg.temperature
+    every = max(1, int(round(params.decision_every_s / dt)))
+    t_sum = t_sq = 0.0
+    t_min, t_max = 1e9, -1e9
+    below_min_h = outside_band_h = h70_off = concern_h = 0.0
     rh_sum = 0.0
     rh_max = 0.0
     h60 = h70 = 0.0
@@ -301,14 +319,27 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
             want = _in_window(local_h, params.night_hours)
         elif strategy == "off":
             want = False
-        else:
+        elif k % every == 0:
+            now = t0 + timedelta(seconds=k * dt)
+            fc = None
+            if cfg.temperature.forecast_enabled:  # perfect forecast from the scenario itself (upper bound)
+                fc = [(now + timedelta(hours=j), model.outdoor_at(sim_h + j))
+                      for j in range(1, int(tcfg.forecast_horizon_h) + 1)]
             cond = Conditions(indoor=ind, indoor_label="simulated basement", indoor_problem=None, outdoor=out,
                               outdoor_problem=None, surface_c=model.surface_c, surface_source="measured",
-                              surface_label="simulated surface", upstairs=None, diff_pressure_pa=None)
-            d = decide(cond, state, cfg, group, t0 + timedelta(seconds=k * dt), local_hour=local_h)
+                              surface_label="simulated surface", upstairs=None, diff_pressure_pa=None,
+                              forecast=fc, forecast_age_h=0.0 if fc else None)
+            d = decide(cond, state, cfg, group, now, local_hour=local_h, thermal_params=model.mp.thermal,
+                       detail=False)
             want = d.target_on
             code = d.reason_code.split(":")[-1]
             reasons[code] = reasons.get(code, 0) + 1
+            if code == "BETTER_FORECAST_WINDOW":
+                state.deferring_since = state.deferring_since or now
+            else:
+                state.deferring_since = None
+        else:
+            want = state.is_on
         if want != state.is_on:
             state.is_on = want
             state.last_change = t0 + timedelta(seconds=k * dt)
@@ -318,6 +349,15 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
         res = model.step(sim_h, dt, fans if state.is_on else [], outdoor=out)
         hrs = dt / 3600
         rh = model.rh * 100
+        tf = c_to_f(model.t_c)
+        t_sum += tf
+        t_sq += tf * tf
+        t_min, t_max = min(t_min, tf), max(t_max, tf)
+        below_min_h += hrs if tf < tcfg.min_allowed_f else 0
+        outside_band_h += hrs if not (tcfg.preferred_min_f <= tf <= tcfg.preferred_max_f) else 0
+        h70_off += hrs if rh > 70 and not state.is_on else 0
+        if delta_c_to_f(model.surface_c - model.air().dew_point_c) < tcfg.condensation_concern_f:
+            concern_h += hrs
         rh_sum += rh
         rh_max = max(rh_max, rh)
         h60 += hrs if rh > 60 else 0
@@ -343,6 +383,7 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
                 "rh": round(rh, 2),
                 "t_f": round(c_to_f(a.t_c), 2),
                 "td_f": round(c_to_f(a.dew_point_c), 2),
+                "surf_f": round(c_to_f(model.surface_c), 2),
                 "out_t_f": round(c_to_f(out.t_c), 2),
                 "out_td_f": round(c_to_f(out.dew_point_c), 2),
                 "on": 1 if state.is_on else 0,
@@ -387,6 +428,16 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
         "surface_at_dewpoint_hours": surface_wet_h,
         "mass_balance_error_kg": (inv1 - inv0) - L.total(),
         "final_outdoor_dewpoint_f": c_to_f(last_out.dew_point_c) if last_out else None,
+        "mean_temp_f": t_sum / max(steps, 1),
+        "temp_std_f": max(0.0, t_sq / max(steps, 1) - (t_sum / max(steps, 1)) ** 2) ** 0.5,
+        "min_temp_f": t_min,
+        "max_temp_f": t_max,
+        "hours_below_min_temp": below_min_h,
+        "hours_outside_preferred": outside_band_h,
+        "hours_above_70_fans_off": h70_off,
+        "surface_margin_concern_hours": concern_h,
+        "max_fan_cooling_f": None,  # filled by compare() against the no-ventilation run
+        "max_fan_warming_f": None,
     }
     name, desc = STRATEGIES[strategy]
     return StrategyResult(strategy, name, desc, summary, series, reasons)
@@ -396,6 +447,13 @@ def compare(params: SimParams, profile: ClimateProfile, base: AppConfig,
             strategies: list[str] | None = None) -> dict:
     ids = strategies or list(STRATEGIES)
     results = [run_strategy(s, params, profile, base) for s in ids]
+    off = next((r for r in results if r.id == "off"), None)
+    if off is None and len(ids) > 0:
+        off = run_strategy("off", params, profile, base)
+    for r in results:
+        diffs = [a["t_f"] - b["t_f"] for a, b in zip(r.series, off.series)] if off else []
+        r.summary["max_fan_cooling_f"] = max([0.0] + [-x for x in diffs])
+        r.summary["max_fan_warming_f"] = max([0.0] + diffs)
     return {
         "kind": "modeled_simulation",
         "label": "Modeled result. Depends on assumed moisture sources, buffering and airflow.",
@@ -437,6 +495,26 @@ def insights(results: list[StrategyResult]) -> list[str]:
         cheap = min(priced, key=lambda r: r.summary["cost_per_gallon_removed"])
         out.append(f"Lowest cost per gallon removed: {cheap.name} (${cheap.summary['cost_per_gallon_removed']:.2f}/gal, "
                    "including estimated conditioned-air loss).")
+    tam = [r for r in results if r.id in TAMO_STRATEGIES]
+    if "optimized" in by and "tamo" in by and (by["optimized"].summary["fan_runtime_h"] > 0
+                                               or by["tamo"].summary["fan_runtime_h"] > 0):
+        a, b = by["optimized"].summary, by["tamo"].summary
+        out.append(f"Temperature-aware control ran {b['fan_runtime_h']:.0f} h vs {a['fan_runtime_h']:.0f} h for the "
+                   f"original logic, removed {b['fan_net_removed_gal']:.2f} vs {a['fan_net_removed_gal']:.2f} gal, and "
+                   f"its largest fan-caused temperature change was {b['max_fan_cooling_f']:.1f}°F cooling vs "
+                   f"{a['max_fan_cooling_f']:.1f}°F.")
+    if "tamo_forecast" in by:
+        out.append("The forecast strategy (G) used this scenario's actual future weather as its forecast, so it is an "
+                   "upper bound on what real forecasts could achieve.")
+    if tam and all(r.summary["hours_above_70"] > 0.25 * max(1e-9, r.summary["fan_runtime_h"] + 1) and
+                   r.summary["hours_above_70_fans_off"] > 6 for r in tam):
+        out.append("Humidity stayed above 70% for long periods with the fans off because outdoor air could not dry "
+                   "the basement safely. Ventilation alone is insufficient here: consider a dehumidifier or fixing "
+                   "the moisture source.")
+    cold = [r for r in results if r.summary["hours_below_min_temp"] > 0.05]
+    if cold:
+        out.append("Basement air fell below the minimum allowed temperature in: " +
+                   ", ".join(f"{r.name} ({r.summary['hours_below_min_temp']:.1f} h)" for r in cold) + ".")
     if "off" in by and "optimized" in by:
         d = by["off"].summary["mean_rh"] - by["optimized"].summary["mean_rh"]
         if abs(d) < 1:

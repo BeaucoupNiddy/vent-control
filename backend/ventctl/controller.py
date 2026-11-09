@@ -8,19 +8,33 @@ Fail-safe rules implemented here:
   * at startup we read every switch and command anything ON to OFF before
     automatic control resumes (safe state after a power outage)
   * manual overrides are time-limited and logged
+
+Temperature-aware optimization (TAMO):
+  * the policy in control (``control.policy``) commands the fans; the other policy
+    is evaluated every tick in shadow mode (never switches hardware) and every
+    agreement/disagreement change is logged, so the new logic can be observed
+    before it is given control, and rolled back with one click
+  * thermal predictions made at each fan start are checked against the observed
+    temperature 30 minutes later; large errors raise the model uncertainty
+    (more conservative limits) and trigger a refit
+  * the thermal model is refit from recorded fan cycles every few hours when learning is on
+  * an optional forecast is refreshed in the background; failures never affect control
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .clock import Clock
-from .config import AppConfig, FanGroup, Mode, SensorRole
+from . import calibration, tamo, thermal
+from .config import AppConfig, ControlPolicy, FanGroup, Mode, SensorRole
 from .engine import Decision, GroupState, decide, group_fans
+from .forecast import ForecastCache
 from .hardware.base import HardwareError, SensorSource, SwitchController, SwitchStatus
 from .sensors import SensorReading, Snapshot, conditions_for_group, validate
 from .storage import Storage
@@ -28,6 +42,14 @@ from .units import delta_f_to_c
 
 log = logging.getLogger("ventctl")
 COMMAND_LOCKOUT_MIN = 30
+THERMAL_REFIT_H = 6
+THERMAL_CHECK_MIN = 30
+SAFETY_ALERT_CODES = {"LOCALIZED_FREEZE_RISK": "critical", "PIPE_SENSOR_UNAVAILABLE": "critical",
+                      "MIN_TEMP_REACHED": "warning", "PREDICTED_MIN_TEMP_BREACH": "warning",
+                      "PREDICTED_SURFACE_CONDENSATION": "warning"}
+NO_SAFE_DRYING_CODES = {"OUTDOOR_WETTER", "CONDENSATION_RISK", "THERMAL_PENALTY_TOO_HIGH", "MIN_TEMP_REACHED",
+                        "PREDICTED_MIN_TEMP_BREACH", "LOCALIZED_FREEZE_RISK", "PREDICTED_SURFACE_CONDENSATION",
+                        "ADVANTAGE_TOO_SMALL", "MOISTURE_BENEFIT_INSUFFICIENT", "BENEFIT_TOO_SMALL"}
 
 
 @dataclass
@@ -84,6 +106,16 @@ class Controller:
     _cycle_times: list[datetime] = field(default_factory=list)
     _command_failures: dict[str, tuple] = field(default_factory=dict)
     dehum_status: SwitchStatus | None = None
+    forecast: ForecastCache | None = None
+    shadow_groups: dict[str, GroupState] = field(default_factory=dict)
+    shadow_decisions: dict[str, Decision] = field(default_factory=dict)
+    thermal_learned: dict | None = None
+    _pending_preds: list[dict] = field(default_factory=list)
+    _thermal_errors: list[float] = field(default_factory=list)
+    _last_fit: datetime | None = None
+    _indoor_hist: deque = field(default_factory=lambda: deque(maxlen=120))
+    _no_safe_since: dict[str, datetime] = field(default_factory=dict)
+    _agree: dict[str, bool] = field(default_factory=dict)
     _started: bool = False
     _task: asyncio.Task | None = None
 
@@ -105,6 +137,8 @@ class Controller:
             gs = GroupState(is_on=False, verified=True, last_change=now if turned_off else None)
             gs.is_on, gs.verified = self._group_switch_state(g.id)
             self.groups[g.id] = gs
+        if self.thermal_learned is None:
+            self.thermal_learned = self.storage.get_kv("thermal_model")
         self.storage.add_event(now, "startup", "info",
                                "Controller started; reconciled switch states" +
                                (" and switched running fans OFF (safe startup state)" if turned_off else ""),
@@ -149,7 +183,8 @@ class Controller:
             if m.role == SensorRole.IGNORE:
                 continue
             r = self._last_readings.get(m.sensor_id)
-            snap.readings.append(validate(m, r, now, stale_s, self._prev_ts.get(m.sensor_id)))
+            snap.readings.append(validate(m, r, now, stale_s, self._prev_ts.get(m.sensor_id),
+                                          cfg.house.default_pressure_kpa()))
             if r:
                 self._prev_ts[m.sensor_id] = r.ts
         self.snapshot = snap
@@ -158,6 +193,15 @@ class Controller:
         for sid in self._switch_ids():
             self._record_status(await self.switches.get(sid), now)
 
+        if self.forecast is not None:
+            try:
+                await self.forecast.refresh(cfg, now)
+            except Exception as e:  # never let a forecast problem affect control
+                log.warning("forecast refresh failed: %s", e)
+        fc = self.forecast.current(now) if self.forecast and cfg.temperature.forecast_enabled else None
+        fc_age = self.forecast.age_h(now) if fc else None
+        tp = self.thermal_params()
+
         local = now.astimezone(ZoneInfo(cfg.system.timezone))
         local_hour = local.hour + local.minute / 60
         for g in cfg.groups:
@@ -165,16 +209,30 @@ class Controller:
             if cfg.mode != Mode.SIMULATION:
                 gs.is_on, gs.verified = self._group_switch_state(g.id)
             cond = conditions_for_group(snap, g, cfg)
-            d = decide(cond, gs, cfg, g, now, local_hour=local_hour)
+            cond.forecast, cond.forecast_age_h = fc, fc_age
+            was_on = gs.is_on
+            d = decide(cond, gs, cfg, g, now, local_hour=local_hour, thermal_params=tp)
+            _track_deferral(gs, d, now)
             prev = self.decisions.get(g.id)
             self.decisions[g.id] = d
             await self._apply(g.id, gs, d, now)
+            self._shadow(g, cond, gs, d, now, local_hour, tp)
             if prev is None or prev.reason_code != d.reason_code or prev.target_on != d.target_on:
                 self.storage.add_event(now, "decision", "warning" if d.safety else "info", d.explanation,
                                        d.reason_code, {"group": g.id, "target_on": d.target_on,
+                                                       "policy": d.policy, "reasons": d.reasons,
+                                                       "opportunity": d.opportunity,
+                                                       "tamo": _tamo_summary(d),
                                                        "readings": snap.to_dict()["readings"],
                                                        "metrics": d.metrics,
                                                        "switches": {s: i.to_dict() for s, i in self.switch_info.items()}})
+            if gs.is_on and not was_on:
+                self._record_prediction(g.id, cond, d, now, tp)
+            self._check_predictions(g.id, gs, cond, now)
+        allc = conditions_for_group(snap, FanGroup(id="_all", name="all"), cfg)
+        if allc.indoor:
+            self._indoor_hist.append((now, allc.indoor))
+        self._maybe_refit(now)
 
         await self._rearm_watchdogs(now)
         await self._read_dehumidifier()
@@ -182,6 +240,147 @@ class Controller:
         if self.last_history is None or (now - self.last_history) >= timedelta(minutes=cfg.system.history_minutes):
             self._write_history(now)
             self.last_history = now
+
+    # ------------------------------------------------------------ TAMO support
+    def thermal_params(self) -> thermal.ThermalParams:
+        return thermal.params_from_config(self.config, self.thermal_learned)
+
+    def set_policy(self, policy: ControlPolicy, who: str = "user") -> None:
+        old = self.config.control.policy
+        if old == policy:
+            return
+        self.config.control.policy = policy
+        self.shadow_groups.clear()
+        self.shadow_decisions.clear()
+        self._agree.clear()
+        self.storage.save_config(self.config)
+        self.storage.add_event(self.clock.now(), "config", "warning", f"Control policy changed from "
+                               f"{_policy_name(old)} to {_policy_name(policy)}", "POLICY_CHANGE",
+                               {"by": who, "from": old.value, "to": policy.value})
+
+    def _shadow(self, g: FanGroup, cond, gs: GroupState, d: Decision, now: datetime, local_hour: float,
+                tp: thermal.ThermalParams) -> None:
+        cfg = self.config
+        if not cfg.control.shadow_evaluation or cfg.mode not in (Mode.AUTO, Mode.SIMULATION):
+            self.shadow_decisions.pop(g.id, None)
+            return
+        other = ControlPolicy.MOISTURE if cfg.control.policy == ControlPolicy.TAMO else ControlPolicy.TAMO
+        sgs = self.shadow_groups.get(g.id)
+        if sgs is None:
+            sgs = self.shadow_groups[g.id] = GroupState(is_on=gs.is_on, verified=gs.verified,
+                                                        last_change=gs.last_change)
+        sgs.verified = gs.verified
+        sd = decide(cond, sgs, cfg, g, now, mode=Mode.SIMULATION, local_hour=local_hour, policy=other,
+                    thermal_params=tp)
+        _track_deferral(sgs, sd, now)
+        if sd.target_on != sgs.is_on:
+            sgs.is_on = sd.target_on
+            sgs.last_change = now
+        self.shadow_decisions[g.id] = sd
+        agree = sd.target_on == d.target_on
+        if self._agree.get(g.id) != agree:
+            self._agree[g.id] = agree
+            self.storage.add_event(
+                now, "shadow", "info",
+                (f"{_policy_name(other)} (shadow) agrees: fans {'ON' if d.target_on else 'OFF'}" if agree else
+                 f"{_policy_name(other)} (shadow) would turn fans {'ON' if sd.target_on else 'OFF'}: {sd.explanation}"),
+                "SHADOW_AGREE" if agree else "SHADOW_DISAGREE",
+                {"group": g.id, "in_control": d.policy, "in_control_reason": d.reason_code,
+                 "shadow": sd.policy, "shadow_reason": sd.reason_code, "tamo": _tamo_summary(sd if sd.tamo else d)})
+
+    def _record_prediction(self, gid: str, cond, d: Decision, now: datetime, tp: thermal.ThermalParams) -> None:
+        t = d.tamo
+        if not t or cond.indoor is None:
+            return
+        pr = t["prediction"]
+        if THERMAL_CHECK_MIN not in pr["minutes"]:
+            return
+        i = pr["minutes"].index(THERMAL_CHECK_MIN)
+        from .units import f_to_c
+        row = {"ts_start": now, "ts_due": now + timedelta(minutes=THERMAL_CHECK_MIN), "group_id": gid,
+               "horizon_min": THERMAL_CHECK_MIN, "start_t_c": cond.indoor.t_c, "inlet_t_c": t["inlet_t_c"],
+               "predicted_c": f_to_c(pr["on_f"][i]), "predicted_conservative_c": f_to_c(pr["on_conservative_f"][i]),
+               "model_version": calibration.THERMAL_MODEL_VERSION, "confidence": tp.confidence,
+               "params": tp.to_dict()}
+        row["id"] = self.storage.add_thermal_prediction(row)
+        self._pending_preds.append(row)
+
+    def _check_predictions(self, gid: str, gs: GroupState, cond, now: datetime) -> None:
+        keep = []
+        for p in self._pending_preds:
+            if p["group_id"] != gid:
+                keep.append(p)
+                continue
+            interrupted = not gs.is_on or (gs.last_change is not None and gs.last_change > p["ts_start"])
+            if interrupted:
+                self.storage.resolve_thermal_prediction(p["id"], None, None)
+                continue
+            if now < p["ts_due"]:
+                keep.append(p)
+                continue
+            if cond.indoor is None:
+                self.storage.resolve_thermal_prediction(p["id"], None, None)
+                continue
+            err_f = (cond.indoor.t_c - p["predicted_c"]) * 1.8  # negative = cooled more than predicted
+            self.storage.resolve_thermal_prediction(p["id"], cond.indoor.t_c, err_f)
+            self._thermal_error(err_f, cond.indoor.t_c < p["predicted_conservative_c"] - 0.15, now)
+        self._pending_preds = keep
+
+    def _thermal_error(self, err_f: float, beyond_conservative: bool, now: datetime) -> None:
+        self._thermal_errors = (self._thermal_errors + [err_f])[-10:]
+        learned = dict(self.thermal_learned or {})
+        extra = float(learned.get("extra_uncertainty", 0.0))
+        recent = self._thermal_errors[-3:]
+        bad = beyond_conservative or (len(recent) >= 3 and abs(sum(recent) / 3) > 1.0)
+        if bad:
+            extra = min(0.6, extra + 0.2)
+            self.storage.add_event(now, "thermal", "warning",
+                                   f"Thermal prediction error: basement temperature changed {abs(err_f):.1f}°F "
+                                   f"{'more' if err_f < 0 else 'less'} than predicted. Using more conservative limits "
+                                   "and refitting the model.", "THERMAL_PREDICTION_ERROR",
+                                   {"error_f": err_f, "recent_errors_f": self._thermal_errors,
+                                    "extra_uncertainty": extra})
+            self._last_fit = None  # refit at the next opportunity
+        elif abs(err_f) < 0.5 and extra > 0:
+            extra = max(0.0, extra - 0.05)
+        learned["extra_uncertainty"] = extra
+        learned["recent_errors_f"] = self._thermal_errors
+        self.thermal_learned = learned
+        self.storage.set_kv("thermal_model", learned)
+
+    def _maybe_refit(self, now: datetime, force: bool = False) -> dict | None:
+        cfg = self.config
+        if not force and (not cfg.temperature.learning_enabled or cfg.mode == Mode.SIMULATION):
+            return None
+        if not force and self._last_fit and now - self._last_fit < timedelta(hours=THERMAL_REFIT_H):
+            return None
+        self._last_fit = now
+        rows = self.storage.history(now - timedelta(days=60), now, max_points=10 ** 7)
+        fit = calibration.fit_thermal(rows, cfg, cfg.temperature.horizon_min)
+        learned = dict(self.thermal_learned or {})
+        hist = list(learned.get("history", []))[-9:]
+        if fit.get("coupling_w_k"):
+            hist.append({"fitted_at": now.isoformat(), "coupling_w_k": fit["coupling_w_k"],
+                         "confidence": fit["confidence"], "cycles": fit["cycles_used"]})
+        learned.update({k: fit.get(k) for k in ("coupling_w_k", "low_w_k", "high_w_k", "uncertainty", "confidence",
+                                                "cycles_used", "cycles_found", "observed", "version")})
+        learned["fitted_at"] = now.isoformat()
+        learned["history"] = hist
+        self.thermal_learned = learned
+        self.storage.set_kv("thermal_model", learned)
+        return fit
+
+    def refit_thermal(self) -> dict:
+        return self._maybe_refit(self.clock.now(), force=True) or {}
+
+    def rh_attribution(self) -> dict | None:
+        if len(self._indoor_hist) < 2:
+            return None
+        now, cur = self._indoor_hist[-1]
+        then = next(((t, a) for t, a in self._indoor_hist if now - t <= timedelta(minutes=65)), None)
+        if then is None or then[0] == now:
+            return None
+        return {"minutes": (now - then[0]).total_seconds() / 60, **tamo.attribute_rh_change(then[1], cur)}
 
     async def _apply(self, gid: str, gs: GroupState, d: Decision, now: datetime) -> None:
         if self.config.mode == Mode.SIMULATION:
@@ -407,6 +606,30 @@ class Controller:
             self._set_alert(now, f"CONDENSATION_UNVERIFIED:{gid}", d.reason_code.endswith("CONDENSATION_UNVERIFIED"),
                             "warning", "Automatic ventilation is blocked until a surface sensor or a conservative "
                             "minimum surface temperature is configured (Settings > Environmental).")
+        for gid, d in self.decisions.items():
+            prim = d.reason_code.split(":")[-1]
+            for code, sev in SAFETY_ALERT_CODES.items():
+                self._set_alert(now, f"{code}:{gid}", prim == code, sev, d.explanation)
+            ind = d.metrics.get("indoor")
+            rh = ind["rh_pct"] if ind else None
+            key = f"HIGH_RH_NO_SAFE_DRYING:{gid}"
+            stuck = rh is not None and rh > cfg.control.high_rh_alert_pct and not d.target_on and prim in NO_SAFE_DRYING_CODES
+            if stuck:
+                since = self._no_safe_since.setdefault(gid, now)
+                hrs = (now - since).total_seconds() / 3600
+                self._set_alert(now, key, hrs >= 3, "critical",
+                                f"Basement RH is {rh:.0f}% and outdoor air has not offered safe, worthwhile drying for "
+                                f"{hrs:.0f} hours (latest reason: {prim}). Ventilation cannot fix this on its own: run "
+                                "a dehumidifier and look for the moisture source.")
+            else:
+                self._no_safe_since.pop(gid, None)
+                self._set_alert(now, key, False)
+        outd = next((d.metrics.get("outdoor") for d in self.decisions.values() if d.metrics.get("outdoor")), None)
+        pipes = [m for m in cfg.sensors.mappings if m.role == SensorRole.PIPE and m.enabled]
+        cold = outd is not None and outd["t_c"] * 1.8 + 32 <= cfg.temperature.freeze_warning_f
+        self._set_alert(now, "PIPES_UNMONITORED", cold and not pipes, "warning",
+                        "Outdoor air is near freezing and no pipe sensor is configured. The basement minimum protects "
+                        "average air temperature only; pipes near vents can be colder.")
         for f in cfg.fans:
             self._set_alert(now, f"MOTOR_LOAD:{f.id}", f.enabled and not f.motor_load_ok, "warning",
                             f"{f.name}: smart switch is not confirmed as rated for this motor load.")
@@ -492,6 +715,16 @@ class Controller:
             "dehum_power_w": dh.power_w if dh and dh.reachable else None,
             "dehum_on": None if self.dehumidifier_running() is None else int(bool(self.dehumidifier_running())),
             "groups": groups,
+            "policy": first.policy if first else None,
+            "utility_g_h": (first.tamo or {}).get("terms", {}).get("utility_g_h") if first else None,
+            "urgency": (first.tamo or {}).get("urgency") if first else None,
+            "thermal_penalty_g_h": (first.tamo or {}).get("terms", {}).get("thermal_penalty_g_h") if first else None,
+            "energy_penalty_g_h": (first.tamo or {}).get("terms", {}).get("energy_penalty_g_h") if first else None,
+            "pred_fan_dt_f": (first.tamo or {}).get("fan_effect_f") if first else None,
+            "shadow_on": (int(self.shadow_decisions[cfg.groups[0].id].target_on)
+                          if cfg.groups[0].id in self.shadow_decisions else None),
+            "opportunity": first.opportunity if first else None,
+            "pipe_t_c": allc.pipe_c,
         })
 
     # ------------------------------------------------------------ status
@@ -512,11 +745,20 @@ class Controller:
                 "manual_until": gs.manual_until.isoformat() if gs.manual_until else None,
                 "maintenance": gs.maintenance,
                 "decision": d.to_dict() if d else None, "fans": fans,
+                "shadow": self.shadow_decisions[g.id].to_dict() if g.id in self.shadow_decisions else None,
+                "deferring_since": gs.deferring_since.isoformat() if gs.deferring_since else None,
             })
         return {
             "now": now.isoformat(),
             "mode": self.config.mode.value,
             "energy_profile": self.config.control.energy_profile.value,
+            "policy": self.config.control.policy.value,
+            "shadow_evaluation": self.config.control.shadow_evaluation,
+            "thermal_model": {**self.thermal_params().to_dict(),
+                              "learned": {k: v for k, v in (self.thermal_learned or {}).items() if k != "history"}},
+            "forecast": self.forecast.status(now, self.config) if self.forecast else
+            {"enabled": self.config.temperature.forecast_enabled, "usable": False, "source": None},
+            "rh_attribution": self.rh_attribution(),
             "data_source": self.data_source,
             "simulation_mode": self.config.mode == Mode.SIMULATION,
             "groups": groups,
@@ -539,3 +781,22 @@ class Controller:
                 "monitored": bool(self.config.dehumidifier.monitor_switch_id),
             },
         }
+
+
+def _policy_name(p: ControlPolicy) -> str:
+    return "Temperature-aware optimization" if p == ControlPolicy.TAMO else "Moisture-only control"
+
+
+def _track_deferral(gs: GroupState, d: Decision, now: datetime) -> None:
+    if d.reason_code.split(":")[-1] == "BETTER_FORECAST_WINDOW":
+        gs.deferring_since = gs.deferring_since or now
+    elif not d.reason_code.startswith("MIN_OFF_HOLD"):
+        gs.deferring_since = None
+
+
+def _tamo_summary(d: Decision) -> dict | None:
+    t = d.tamo
+    if not t:
+        return None
+    return {"terms": t["terms"], "urgency": t["urgency"], "fan_effect_f": t["fan_effect_f"],
+            "removal_g_h": t["removal_g_h"], "opportunity": t.get("opportunity"), "in_control": t["in_control"]}

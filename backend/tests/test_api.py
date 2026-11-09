@@ -16,7 +16,7 @@ def test_api_smoke(tmp_path):
         assert c.get("/api/events").json()
         assert len(c.get("/api/sim/profiles").json()) >= 5
         r = c.post("/api/sim/run", json={"profile_id": "nola_summer", "params": {"duration_h": 24}}).json()
-        assert len(r["results"]) == 6 and r["kind"] == "modeled_simulation"
+        assert len(r["results"]) == 10 and r["kind"] == "modeled_simulation"
         assert c.post("/api/replay", json={"range": "24h"}).json()["kind"] == "opportunity_replay"
         calc = c.post("/api/calc", json={"t_f": 79, "rh_pct": 95}).json()
         assert abs(calc["dew_point_f"] - 77.4) < 0.2

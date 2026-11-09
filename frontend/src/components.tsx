@@ -55,11 +55,14 @@ export function fanIntervals(rows: { x: number; on: boolean }[]): [number, numbe
 }
 
 export function TimeChart({
-  data, series, unit, height = 220, fanOn, xFormat, zeroLine, yDomain, digits = 1, title, badge,
+  data, series, unit, height = 220, fanOn, xFormat, zeroLine, yDomain, digits = 1, title, badge, band, lines, nowX,
 }: {
   data: Json[]; series: Series[]; unit: string; height?: number; fanOn?: [number, number][];
   xFormat: (x: number) => string; zeroLine?: boolean; yDomain?: [number | string, number | string]; digits?: number;
   title: string; badge?: string;
+  band?: { y1: number; y2: number; label: string };
+  lines?: { y: number; label: string; tone?: "crit" | "warn" }[];
+  nowX?: number;
 }) {
   return (
     <div>
@@ -72,6 +75,7 @@ export function TimeChart({
             <span key={s.key}><span className="sw" style={{ background: s.color }} />{s.name}</span>
           ))}
           {fanOn && <span><span className="sw area" style={{ background: "var(--fan-shade)" }} />Fans on</span>}
+          {band && <span><span className="sw area" style={{ background: "var(--band-shade)" }} />{band.label}</span>}
         </div>
       </div>
       <ResponsiveContainer width="100%" height={height}>
@@ -85,6 +89,12 @@ export function TimeChart({
           <YAxis tick={{ fill: "var(--text-3)", fontSize: 11 }} axisLine={false} tickLine={false} width={44}
             domain={yDomain || ["auto", "auto"]} tickFormatter={(v) => `${Number(v).toFixed(digits >= 2 ? 1 : 0)}`} />
           {zeroLine && <ReferenceLine y={0} stroke="var(--text-3)" strokeDasharray="3 3" />}
+          {band && <ReferenceArea y1={band.y1} y2={band.y2} fill="var(--band-shade)" fillOpacity={1} stroke="none" ifOverflow="hidden" />}
+          {lines?.map((l) => (
+            <ReferenceLine key={l.label} y={l.y} stroke={l.tone === "crit" ? "var(--critical)" : "var(--warning)"} strokeDasharray="4 3"
+              label={{ value: l.label, position: "insideBottomLeft", fill: "var(--text-3)", fontSize: 11 }} ifOverflow="extendDomain" />
+          ))}
+          {nowX !== undefined && <ReferenceLine x={nowX} stroke="var(--text-3)" label={{ value: "now", position: "insideTopRight", fill: "var(--text-3)", fontSize: 11 }} />}
           <Tooltip
             cursor={{ stroke: "var(--text-3)", strokeWidth: 1 }}
             content={({ active, payload, label }) => {

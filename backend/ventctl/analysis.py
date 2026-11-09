@@ -99,8 +99,10 @@ REPLAY_POLICIES = {
     "continuous": "Continuous (24/7)",
     "daytime": "Daytime only (8 AM-8 PM)",
     "nighttime": "Nighttime only (8 PM-8 AM)",
-    "dewpoint": "Dew-point controlled",
-    "optimized": "Efficiency optimized",
+    "dewpoint": "Simple dew-point control",
+    "optimized": "Moisture-optimized (original)",
+    "tamo": "Moisture + temperature",
+    "preserve": "Temperature preservation",
     "off": "Ventilation off",
 }
 
@@ -119,12 +121,8 @@ def replay(rows: list[dict], config: AppConfig, tz) -> dict:
     fans = group_fans(config, group)
     results = []
     for pid, name in REPLAY_POLICIES.items():
-        cfg = config.model_copy(deep=True)
-        cfg.mode = Mode.SIMULATION
-        if pid == "dewpoint":
-            cfg.control.energy_profile = EnergyProfile.MAX_DRYING
-        elif pid == "optimized" and cfg.control.energy_profile == EnergyProfile.MAX_DRYING:
-            cfg.control.energy_profile = EnergyProfile.BALANCED
+        from .simulation import strategy_config
+        cfg = strategy_config(config, pid)
         state = GroupState()
         on_h = adding_h = risk_h = transfer_g = kwh = 0.0
         cycles = 0
@@ -146,7 +144,7 @@ def replay(rows: list[dict], config: AppConfig, tz) -> dict:
             else:
                 cond = Conditions(ind, "recorded", None if ind else "missing", out, None if out else "missing",
                                   surf, r.get("surface_source"), "recorded", None, None)
-                want = decide(cond, state, cfg, group, ts, local_hour=lh).target_on
+                want = decide(cond, state, cfg, group, ts, local_hour=lh, detail=False).target_on
             if want != state.is_on:
                 state.is_on = want
                 state.last_change = ts
@@ -203,3 +201,22 @@ def range_for(key: str, now: datetime, start: str | None = None, end: str | None
         return datetime.fromisoformat(start), datetime.fromisoformat(end)
     days = {"24h": 1, "7d": 7, "30d": 30, "90d": 90, "365d": 365, "all": 3650}.get(key, 1)
     return now - timedelta(days=days), now
+
+
+def shadow_agreement(rows: list[dict]) -> dict:
+    """How often the policy in control and the shadow policy agreed, from recorded history."""
+    hrs = _intervals(rows) if rows else []
+    both = agree = on_ctrl = on_shadow = 0.0
+    by_policy: dict[str, float] = {}
+    for r, h in zip(rows, hrs):
+        if r.get("shadow_on") is None:
+            continue
+        ctrl_on = (r.get("fans_on") or 0) > 0
+        sh_on = bool(r["shadow_on"])
+        both += h
+        agree += h if ctrl_on == sh_on else 0
+        on_ctrl += h if ctrl_on else 0
+        on_shadow += h if sh_on else 0
+        by_policy[r.get("policy") or "unknown"] = by_policy.get(r.get("policy") or "unknown", 0) + h
+    return {"hours_compared": both, "agreement_pct": agree / both * 100 if both else None,
+            "runtime_in_control_h": on_ctrl, "runtime_shadow_h": on_shadow, "hours_by_policy": by_policy}

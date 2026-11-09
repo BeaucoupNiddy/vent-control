@@ -36,7 +36,7 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "system.decision_seconds", label: "Decision interval (s)" },
   ] },
   { title: "Efficiency", fields: [
-    { path: "control.energy_profile", label: "Energy profile", type: "select", options: [["max_drying", "Maximum Drying"], ["balanced", "Balanced"], ["energy_saver", "Energy Saver"]] },
+    { path: "control.energy_profile", label: "Energy profile", type: "select", options: [["max_drying", "Maximum Drying"], ["balanced", "Balanced"], ["temperature_preservation", "Temperature Preservation"], ["energy_saver", "Energy Saver"]] },
     { path: "control.min_efficiency_g_per_kwh_balanced", label: "Balanced: min efficiency (g/kWh)" },
     { path: "control.min_efficiency_g_per_kwh_saver", label: "Energy Saver: min efficiency (g/kWh)" },
     { path: "control.efficiency_off_factor", label: "Stop below fraction of start threshold", step: 0.05 },
@@ -48,6 +48,33 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "house.heating_cop", label: "Heating efficiency (COP)", step: 0.1 },
     { path: "house.natural_ach", label: "Natural leakage (ACH)", step: 0.1 },
     { path: "house.basement_volume_ft3", label: "Basement air volume (ft³)", step: 100 },
+  ] },
+  { title: "Temperature optimization", note: "Used by the temperature-aware controller (TAMO). The minimum temperature, pipe freeze protection and condensation checks are hard limits for both controllers. Penalty weights are heuristics, expressed in grams of water per hour so they can be compared with drying.", fields: [
+    { path: "temperature.preferred_min_f", label: "Preferred minimum (°F)" },
+    { path: "temperature.preferred_max_f", label: "Preferred maximum (°F)" },
+    { path: "temperature.soft_tolerance_f", label: "Soft tolerance outside range (°F)", step: 0.5, hint: "Penalty grows faster past this distance" },
+    { path: "temperature.min_allowed_f", label: "Minimum allowed basement temp (°F)", hint: "Hard limit, checked with a conservative prediction" },
+    { path: "temperature.freeze_warning_f", label: "Pipe freeze warning (°F)", hint: "Needs a sensor with role \"pipe\"" },
+    { path: "temperature.sensitivity", label: "Temperature sensitivity", type: "select", options: [["low", "Low"], ["medium", "Medium"], ["high", "High"], ["custom", "Custom"]] },
+    { path: "temperature.custom_sensitivity_g_h", label: "Custom sensitivity (g/h per °F²)", step: 100 },
+    { path: "temperature.change_tolerance_f", label: "Swing tolerance inside range (°F)", step: 0.5 },
+    { path: "temperature.horizon_min", label: "Prediction horizon (min)", type: "select", options: [["15", "15"], ["30", "30"], ["60", "60"], ["120", "120"]] },
+    { path: "temperature.urgency_enabled", label: "Relax temperature limits when humid", type: "bool" },
+    { path: "temperature.urgency_low_rh_pct", label: "No urgency at or below RH (%)" },
+    { path: "temperature.urgency_high_rh_pct", label: "Full urgency at or above RH (%)" },
+    { path: "temperature.utility_start_g_h", label: "Start when net utility ≥ (g/h)", step: 10 },
+    { path: "temperature.utility_stop_g_h", label: "Stop when net utility < (g/h)", step: 10 },
+    { path: "temperature.min_dw_start_g_kg", label: "Min humidity-ratio advantage to start (g/kg)", step: 0.05 },
+    { path: "temperature.min_dw_stop_g_kg", label: "Min humidity-ratio advantage to keep running (g/kg)", step: 0.05 },
+    { path: "temperature.learning_enabled", label: "Learn thermal response from fan cycles", type: "bool" },
+    { path: "temperature.learning_confidence", label: "Use learned model when confidence is", type: "select", options: [["conservative", "High only"], ["standard", "Medium or high"]] },
+    { path: "temperature.air_structure_coupling_w_k", label: "Air-to-structure coupling (W/K)", nullable: true, hint: "Blank = estimate / learn" },
+    { path: "temperature.structure_heat_capacity_mj_k", label: "Structure heat capacity (MJ/K)", nullable: true, hint: "Blank = estimate" },
+    { path: "temperature.forecast_enabled", label: "Use outdoor forecast (optional)", type: "bool", hint: "Open-Meteo, no account. Works without internet." },
+    { path: "temperature.forecast_latitude", label: "Latitude", step: 0.01 },
+    { path: "temperature.forecast_longitude", label: "Longitude", step: 0.01 },
+    { path: "temperature.max_deferral_min", label: "Max wait for a better window (min)" },
+    { path: "house.elevation_ft", label: "Elevation (ft)", hint: "Sets air pressure for psychrometrics" },
   ] },
   { title: "Safety interlocks", note: "Fan control must never override required combustion air, flood openings or legally required ventilation. Have naturally vented gas appliances checked for backdrafting before running exhaust-only ventilation unattended.", fields: [
     { path: "control.water_intrusion_lockout", label: "Water-intrusion lockout active", type: "bool" },
@@ -182,7 +209,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
                       <td className="faint">{m.sensor_id}</td>
                       <td><input value={m.name} onChange={(e) => mapChange(i, "name", e.target.value)} /></td>
                       <td><select value={m.role} onChange={(e) => mapChange(i, "role", e.target.value)}>
-                        {["outdoor", "basement", "surface", "upstairs", "pressure", "ignore"].map((r) => <option key={r}>{r}</option>)}</select></td>
+                        {["outdoor", "basement", "surface", "pipe", "upstairs", "pressure", "ignore"].map((r) => <option key={r}>{r}</option>)}</select></td>
                       <td><input value={m.zone ?? ""} style={{ width: 80 }} onChange={(e) => mapChange(i, "zone", e.target.value || null)} /></td>
                       <td><input type="number" step={0.1} style={{ width: 70 }} value={m.temp_offset_f} onChange={(e) => mapChange(i, "temp_offset_f", Number(e.target.value))} /></td>
                       <td><input type="number" step={0.5} style={{ width: 70 }} value={m.rh_offset_pct} onChange={(e) => mapChange(i, "rh_offset_pct", Number(e.target.value))} /></td>
