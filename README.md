@@ -10,15 +10,30 @@ A local web app that decides when exchanging basement air with outdoor air actua
 
 ## Quick start
 
-### macOS (native Python)
+### macOS (easiest)
 
 ```bash
-# one-time
-brew install python@3.12 node            # or use python.org / nvm
-git clone <this repo> vent-control && cd vent-control
+# one-time: get the code with git (needed for automatic updates) and run the installer
+git clone https://github.com/BeaucoupNiddy/vent-control.git ~/Projects/vent-control
+bash ~/Projects/vent-control/deploy/install-mac.sh
+```
+
+The installer adds Python 3.12 and Node with Homebrew if they're missing, builds the dashboard, sets up Python, and opens http://localhost:8000. It also installs two LaunchAgents:
+
+- `com.ventctl` starts the controller at login and restarts it if it stops.
+- `com.ventctl.update` checks GitHub every 30 minutes. When something new is merged to `main`, it downloads it, rebuilds, runs the tests, and restarts the controller only if they pass. Otherwise it stays on the running version. The log is in `data/update.log`. To update immediately, run `deploy/update.sh --force`.
+
+So the update path is: a change is merged on GitHub, and within about 30 minutes the Mac is running it. When it restarts, the controller reads every plug and turns running fans OFF before resuming, as on any startup.
+
+Set the Mac to never sleep and to restart after a power failure (System Settings, Energy).
+
+### macOS (by hand)
+
+```bash
+brew install python@3.12 node
 cd frontend && npm ci && npm run build && cd ..   # builds the dashboard into backend/ventctl/static
 cd backend
-python3 -m venv .venv && source .venv/bin/activate
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 
 # run
@@ -37,7 +52,7 @@ Useful environment variables:
 | `VENTCTL_DEMO_SPEED` | `1` | Speeds up mock time, e.g. `60` = one hour per minute |
 | `VENTCTL_BACKFILL_HOURS` | `48` | Mock history created on first start (0 = none) |
 
-**Start automatically and restart on failure (macOS):** edit the paths in `deploy/com.ventctl.plist`, copy it to `~/Library/LaunchAgents/` and run `launchctl load ~/Library/LaunchAgents/com.ventctl.plist`. Also set the Mac to restart after a power failure and to never sleep (System Settings, Energy).
+**Start automatically by hand (macOS):** `deploy/install-mac.sh` does this for you. To do it by hand, edit the paths in `deploy/com.ventctl.plist`, copy it to `~/Library/LaunchAgents/` and run `launchctl load ~/Library/LaunchAgents/com.ventctl.plist`.
 
 **Dashboard development:** run `python -m ventctl` in one terminal and `cd frontend && npm run dev` in another. Then open http://localhost:5173, which proxies `/api` to the backend.
 
