@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, calibration, climate, reports, simulation, weather
+from . import analysis, calibration, climate, reports, simulation, updater, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -195,6 +195,17 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     @app.get("/api/health")
     def health():
         return {"ok": True, "now": ctrl().clock.now().isoformat()}
+
+    @app.get("/api/update")
+    def update_info():
+        return updater.info()
+
+    @app.post("/api/update")
+    def update_now():
+        try:
+            return updater.start()
+        except RuntimeError as e:
+            raise HTTPException(409, str(e))
 
     @app.get("/api/status")
     def status():

@@ -67,6 +67,8 @@ export const api = {
     req("POST", "/api/sensors/compare", { action, sensor_ids, apply }),
   simZones: (body: Json) => req("POST", "/api/sim/zones", body),
   simZoneStrategies: () => req("GET", "/api/sim/zones/strategies"),
+  updateInfo: () => req("GET", "/api/update"),
+  updateNow: () => req("POST", "/api/update"),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),

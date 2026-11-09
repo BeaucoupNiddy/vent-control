@@ -21,7 +21,7 @@ bash ~/Projects/vent-control/deploy/install-mac.sh
 The installer adds Python 3.12 and Node with Homebrew if they're missing, builds the dashboard, sets up Python, and opens http://localhost:8000. It also installs two LaunchAgents:
 
 - `com.ventctl` starts the controller at login and restarts it if it stops.
-- `com.ventctl.update` checks GitHub every 30 minutes. When something new is merged to `main`, it downloads it, rebuilds, runs the tests, and restarts the controller only if they pass. Otherwise it stays on the running version. The log is in `data/update.log`. To update immediately, run `deploy/update.sh --force`.
+- `com.ventctl.update` checks GitHub every 30 minutes. When something new is merged to `main`, it downloads it, rebuilds, runs the tests, and restarts the controller only if they pass. Otherwise it stays on the running version. The log is in `data/update.log`. To update immediately, press **Update now** in Settings, App updates (it also shows the installed version, the last result and the log), or run `deploy/update.sh --force`.
 
 So the update path is: a change is merged on GitHub, and within about 30 minutes the Mac is running it. When it restarts, the controller reads every plug and turns running fans OFF before resuming, as on any startup.
 
