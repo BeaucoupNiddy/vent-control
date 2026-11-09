@@ -47,6 +47,7 @@ export function ZonePanel({ status }: { status: Json }) {
             {" "}({GRADIENT_REASON[g.reason] || g.reason}).</>}
         </p>
       )}
+      <BasementAverage status={status} />
       <div className="grid g3">
         {zones.map((z) => {
           const lv = LEVEL[z.level] || LEVEL.acceptable;
@@ -78,6 +79,38 @@ export function ZonePanel({ status }: { status: Json }) {
         })}
       </div>
     </Card>
+  );
+}
+
+/** Whole-basement average: what you would read if all the basement air were mixed together. */
+export function BasementAverage({ status }: { status: Json }) {
+  const u = useUnit();
+  const a = status?.basement_average;
+  if (!a || a.count < 2) return null;
+  const lv = LEVEL[a.level] || LEVEL.acceptable;
+  const tr = a.trend || {};
+  const weights = (a.included || []).map((x: Json) => `${x.name} ${Math.round(x.weight * 100)}%`).join(", ");
+  return (
+    <div className="zone-card" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <strong>Whole-basement average</strong>
+        <span className={`badge ${lv.cls}`}>{lv.label}</span>
+      </div>
+      <div className="big-num" style={{ fontSize: 24 }}>{temp(a.t_c, u)} · {pct(a.rh_pct)}</div>
+      <dl className="kv">
+        <dt>Dew point</dt><dd>{temp(a.dew_point_c, u)}</dd>
+        <dt>Humidity ratio</dt><dd>{num(a.w_g_kg, 2)} g/kg</dd>
+        <dt>Range across zones</dt><dd>{pct(a.rh_min_pct)} – {pct(a.rh_max_pct)} RH</dd>
+        <dt>RH trend</dt><dd>{tr.rh_pct_h == null ? "—" : `${tr.rh_pct_h >= 0 ? "+" : ""}${tr.rh_pct_h.toFixed(1)} %/h`}</dd>
+        <dt>Weighting</dt><dd>{a.method === "equal" ? "equal per sensor" : `by zone volume (${weights})`}</dd>
+      </dl>
+      <p className="faint" style={{ margin: "6px 0 0" }}>
+        Averages the water in the air and the temperature, then works out RH, as if all the air were mixed.
+        For monitoring only: fan decisions still use the control reading
+        {status?.groups?.[0]?.decision?.metrics?.indoor_label ? ` (${status.groups[0].decision.metrics.indoor_label})` : ""}.
+        {a.partial && <> Missing: {a.missing.join(", ")}.</>}
+      </p>
+    </div>
   );
 }
 

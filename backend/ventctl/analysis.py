@@ -44,6 +44,8 @@ def stats(rows: list[dict], config: AppConfig) -> dict:
     cond_ft3 = penalty_kwh = dh_h = dh_kwh = 0.0
     dh_known = False
     prev_on = False
+    avg_h = avg_rh_h = avg_td_h = avg_above = 0.0
+    avg_rh_lo = avg_rh_hi = None
     min_rem, _ = profile_thresholds(config)
     for r, h in zip(rows, hrs):
         on = (r["fans_on"] or 0) > 0
@@ -65,6 +67,14 @@ def stats(rows: list[dict], config: AppConfig) -> dict:
         if rh is not None:
             above60 += h if rh > config.control.upper_rh_pct else 0
             above70 += h if rh > config.control.high_rh_alert_pct else 0
+        arh = r.get("avg_rh")
+        if arh is not None:
+            avg_h += h
+            avg_rh_h += arh * h
+            avg_td_h += (r.get("avg_td_c") or 0) * h
+            avg_above += h if arh > config.control.upper_rh_pct else 0
+            avg_rh_lo = arh if avg_rh_lo is None else min(avg_rh_lo, arh)
+            avg_rh_hi = arh if avg_rh_hi is None else max(avg_rh_hi, arh)
         code = (r["reason_code"] or "").split(":")[-1]
         if (r["potential_removal_g_h"] or 0) >= min_rem and not code.startswith(SAFETY_CODES):
             fav += h
@@ -79,6 +89,11 @@ def stats(rows: list[dict], config: AppConfig) -> dict:
         "electricity_cost": kwh * config.house.electricity_cost_per_kwh,
         "hours_above_upper": above60,
         "hours_above_high": above70,
+        # whole-basement average (moisture-weighted across zones); the hours above use the worst zone
+        "basement_average": None if not avg_h else {
+            "hours": avg_h, "mean_rh_pct": avg_rh_h / avg_h, "mean_dew_point_c": avg_td_h / avg_h,
+            "min_rh_pct": avg_rh_lo, "max_rh_pct": avg_rh_hi, "hours_above_upper": avg_above,
+        },
         "favorable_pct": (fav / total * 100) if total else None,
         "favorable_label": "modeled",
         "conditioned_air_ft3": cond_ft3,

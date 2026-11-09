@@ -104,6 +104,13 @@ MIGRATIONS: list[str] = [
     ALTER TABLE history ADD COLUMN upstairs_w REAL;
     ALTER TABLE history ADD COLUMN exhaust_w REAL;   -- humidity ratio of the ventilation-path zones (air at the fan)
     """,
+    # 6: whole-basement average air (all basement zones, weighted by volume; monitoring only)
+    """
+    ALTER TABLE history ADD COLUMN avg_t_c REAL;
+    ALTER TABLE history ADD COLUMN avg_rh REAL;      -- percent, derived from the average moisture content
+    ALTER TABLE history ADD COLUMN avg_td_c REAL;
+    ALTER TABLE history ADD COLUMN avg_w REAL;       -- kg/kg
+    """,
 ]
 
 
