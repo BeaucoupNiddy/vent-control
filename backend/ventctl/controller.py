@@ -130,6 +130,7 @@ class Controller:
     zone_tracker: zones_mod.ZoneTracker = field(default_factory=zones_mod.ZoneTracker)
     surface_tracker: surf_mod.SurfaceTracker = field(default_factory=surf_mod.SurfaceTracker)
     zone_status: dict = field(default_factory=dict)
+    basement_avg: dict | None = None  # whole-basement average air (monitoring only)
     surface_status: list = field(default_factory=list)
     circ_states: dict = field(default_factory=dict)  # real plug state per circulator
     circ_shadow: dict = field(default_factory=dict)  # hypothetical state while not commanding
@@ -289,6 +290,7 @@ class Controller:
         coloc = set(self.comparison["sensor_ids"]) if self.comparison else set()
         zs = zones_mod.zone_statuses(snap, cfg, self.zone_tracker, now, coloc)
         self.zone_status = zs
+        self.basement_avg = zones_mod.basement_average(zs, cfg, snap, self.zone_tracker, now)
         ss = surf_mod.surface_statuses(snap, cfg, zs, self.surface_tracker, now, fallback=allc.indoor,
                                        outdoor=allc.outdoor, forecast=fc)
         d0 = self.decisions.get(cfg.groups[0].id) if cfg.groups else None
@@ -1043,6 +1045,7 @@ class Controller:
         ind = allc.indoor.to_dict() if allc.indoor else None
         out = allc.outdoor.to_dict() if allc.outdoor else None
         sim = cfg.mode == Mode.SIMULATION
+        ba = self.basement_avg
         on_count = 0
         power = 0.0
         all_verified = True
@@ -1126,6 +1129,8 @@ class Controller:
             "opportunity": first.opportunity if first else None,
             "pipe_t_c": allc.pipe_c,
             "circ": circ, "surfaces": surfaces,
+            "avg_t_c": ba["t_c"] if ba else None, "avg_rh": ba["rh_pct"] if ba else None,
+            "avg_td_c": ba["dew_point_c"] if ba else None, "avg_w": ba["w_g_kg"] / 1000 if ba else None,
             "upstairs_t_c": allc.upstairs.t_c if allc.upstairs else None,
             "upstairs_w": allc.upstairs.w if allc.upstairs else None,
             "exhaust_w": (allc.exhaust or allc.indoor).w if allc.indoor else None,
@@ -1182,6 +1187,7 @@ class Controller:
             },
             "zones": {k: z.to_dict() for k, z in self.zone_status.items()},
             "zone_summary": zones_mod.summary(self.zone_status, self.config) if self.zone_status else None,
+            "basement_average": self.basement_avg,
             "surfaces": [x.to_dict() for x in self.surface_status],
             "airflow_model": {"upstairs_fraction": calibration.effective_upstairs_fraction(self.config,
                                                                                           self.airflow_learned)[0],

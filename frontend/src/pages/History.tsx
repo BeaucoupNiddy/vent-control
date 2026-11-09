@@ -48,6 +48,7 @@ export default function History() {
       in_t: tempVal(r.indoor_t_c, u), out_t: tempVal(r.outdoor_t_c, u), surf: tempVal(r.surface_t_c, u),
       in_rh: r.indoor_rh, out_rh: r.outdoor_rh,
       in_td: tempVal(r.indoor_td_c, u), out_td: tempVal(r.outdoor_td_c, u),
+      avg_t: tempVal(r.avg_t_c, u), avg_rh: r.avg_rh, avg_td: tempVal(r.avg_td_c, u),
       dw: r.indoor_w != null && r.outdoor_w != null ? (r.indoor_w - r.outdoor_w) * 1000 : null,
       removal: r.fans_on > 0 ? (r.removal_g_h * 24) / 3785.4 : 0,
       potential: r.potential_removal_g_h != null ? (r.potential_removal_g_h * 24) / 3785.4 : null,
@@ -72,6 +73,11 @@ export default function History() {
   const T = `°${u}`;
   const zoneColors = ["var(--series-1)", "var(--series-3)", "var(--series-4)", "var(--series-5)"];
   const src = data?.rows?.[0]?.source;
+  // the whole-basement average only adds information when there is more than one zone
+  const showAvg = zoneKeys.length > 1 && rows.some((r: Json) => r.avg_rh != null);
+  const inName = showAvg ? "Basement (used for control)" : "Basement";
+  const avgSeries = (key: string) => (showAvg ? [{ key, name: "Whole-basement average", color: "var(--series-6)", dashed: true }] : []);
+  const ba = stats?.basement_average;
 
   const f2u = (f: number) => (u === "F" ? f : ((f - 32) * 5) / 9);
   async function refit() {
@@ -115,6 +121,7 @@ export default function History() {
             <Stat label="Electricity" badge={stats.electricity_label} value={`${stats.electricity_kwh.toFixed(2)} kWh · $${stats.electricity_cost.toFixed(2)}`} />
             <Stat label="Above upper RH" value={hours(stats.hours_above_upper)} />
             <Stat label="Above high RH" value={hours(stats.hours_above_high)} />
+            {ba && zoneKeys.length > 1 && <Stat label="Whole-basement average RH" value={`${pct(ba.mean_rh_pct)} (${pct(ba.min_rh_pct)}–${pct(ba.max_rh_pct)})`} />}
             <Stat label="Ventilation favorable" badge="modeled" value={pct(stats.favorable_pct)} />
             <Stat label="Conditioned air lost" badge="modeled" value={`${Math.round(stats.conditioned_air_ft3).toLocaleString()} ft³ · $${stats.conditioned_air_cost.toFixed(2)}`} />
             {stats.dehumidifier && <Stat label="Dehumidifier" value={`${hours(stats.dehumidifier.runtime_h)} · ${stats.dehumidifier.kwh.toFixed(1)} kWh`} />}
@@ -126,16 +133,19 @@ export default function History() {
       {rows.length === 0 ? <Card><p className="muted">No recorded data in this range.</p></Card> : (
         <div className="grid g2">
           <Card><TimeChart title="Temperature" unit={T} data={rows} xFormat={xf} fanOn={fan} series={[
-            { key: "in_t", name: "Basement", color: "var(--series-1)" },
+            { key: "in_t", name: inName, color: "var(--series-1)" },
+            ...avgSeries("avg_t"),
             { key: "out_t", name: "Outdoor", color: "var(--series-2)" },
             { key: "surf", name: "Coldest surface", color: "var(--series-3)", dashed: true },
           ]} /></Card>
           <Card><TimeChart title="Dew point" unit={T} data={rows} xFormat={xf} fanOn={fan} series={[
-            { key: "in_td", name: "Basement", color: "var(--series-1)" },
+            { key: "in_td", name: inName, color: "var(--series-1)" },
+            ...avgSeries("avg_td"),
             { key: "out_td", name: "Outdoor", color: "var(--series-2)" },
           ]} /></Card>
           <Card><TimeChart title="Relative humidity" unit="%" data={rows} xFormat={xf} fanOn={fan} digits={0} series={[
-            { key: "in_rh", name: "Basement", color: "var(--series-1)" },
+            { key: "in_rh", name: inName, color: "var(--series-1)" },
+            ...avgSeries("avg_rh"),
             { key: "out_rh", name: "Outdoor", color: "var(--series-2)" },
           ]} /></Card>
           <Card><TimeChart title="Basement humidity by room" unit="%" data={rows} xFormat={xf} fanOn={fan} digits={0}
