@@ -139,7 +139,9 @@ function SurfaceRow({ s, rows, u }: { s: Json; rows: Json[]; u: "F" | "C" }) {
             <ul className="plain">
               <li><strong>Now (measured indoor air):</strong> {rk?.label || "—"}.</li>
               <li><strong>If outdoor air reached it:</strong>{" "}
-                {v.outdoor_margin_f == null ? "no outdoor reading" : v.outdoor_air_would_condense
+                {v.outdoor_margin_f == null ? "no outdoor reading" : v.outdoor_air_wetter_than_local === false
+                  ? "outdoor air is drier than the air here, so ventilating lowers the dew point at this surface."
+                  : v.outdoor_air_would_condense
                   ? `outdoor dew point ${temp(v.outdoor_dew_point_c, u)} is at or above this surface. Ventilation could cause condensation here.`
                   : v.outdoor_air_risky ? `margin would be about ${deltaTemp(v.outdoor_margin_f, u)}. Risky.`
                     : `margin would be about ${deltaTemp(v.outdoor_margin_f, u)}.`}</li>

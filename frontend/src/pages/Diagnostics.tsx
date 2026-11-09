@@ -23,6 +23,7 @@ export default function Diagnostics({ status }: { status: Json }) {
   return (
     <div className="grid g2">
       <SensorComparison status={status} />
+      <UpstairsAirCard model={status?.airflow_model} />
       {status?.data_source === "mock" && mock && (
         <Card title="Mock fault injection" right={<span className="badge mock">mock hardware</span>}>
           <p className="note">Exercise the fail-safe behavior. Effects show on the dashboard within a decision cycle; stale-sensor
@@ -68,5 +69,25 @@ export default function Diagnostics({ status }: { status: Json }) {
         <p className="faint">ASHRAE Hyland-Wexler saturation over liquid water, ideal-gas humidity ratio, sea-level pressure.</p>
       </Card>
     </div>
+  );
+}
+
+function UpstairsAirCard({ model }: { model: Json }) {
+  if (!model) return null;
+  const l = model.learned || {};
+  return (
+    <Card title="Where the fan's makeup air comes from">
+      <p className="note">An exhaust fan pulls replacement air from wherever the house leaks most: outdoors, or down through
+        the floor from upstairs. Upstairs air is already heated or cooled, so it costs energy while the HVAC runs.</p>
+      <p>Using <strong>{num(model.upstairs_fraction * 100, 0)}%</strong> from upstairs
+        ({model.source === "learned" ? "learned from fan starts" : "assumed"}).</p>
+      {l.fraction != null ? (
+        <p className="note">Estimate from {l.starts_used} fan starts: {num(l.fraction * 100, 0)}% (likely range{" "}
+          {num(l.low * 100, 0)}–{num(l.high * 100, 0)}%), confidence {l.confidence}.{" "}
+          {model.source !== "learned" && "Used once confidence is medium or better."}</p>
+      ) : (
+        <p className="note">{l.note || "Not estimated yet. Needs an upstairs temperature/humidity sensor and a few days of fan runs."}</p>
+      )}
+    </Card>
   );
 }

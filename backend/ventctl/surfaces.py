@@ -38,7 +38,7 @@ from .units import c_to_f, delta_c_to_f
 CLASSES = ("lower", "monitor", "elevated", "possible")
 CLASS_LABELS = {"lower": "Lower immediate risk", "monitor": "Monitor", "elevated": "Elevated risk",
                 "possible": "Condensation possible"}
-DEFAULT_AIR_FOLLOW = 0.5
+DEFAULT_AIR_FOLLOW = 0.2  # concrete is slow: a ~4 h surface time constant follows ~12% in 30 min; 0.2 keeps a margin
 
 
 def surface_rh(local: AirState, surface_c: float) -> float:
@@ -202,8 +202,12 @@ def surface_statuses(snapshot, config: AppConfig, zones: dict, tracker: SurfaceT
             om = delta_c_to_f(r.temp_c - outdoor.dew_point_c)
             st.ventilation["outdoor_dew_point_c"] = outdoor.dew_point_c
             st.ventilation["outdoor_margin_f"] = om
-            st.ventilation["outdoor_air_would_condense"] = om <= ss.possible_margin_f + st.uncertainty_f
-            st.ventilation["outdoor_air_risky"] = om < ss.elevated_margin_f + st.uncertainty_f
+            # outdoor air drier than the air already at the surface lowers its dew point there: only wetter
+            # outdoor air can make this surface riskier
+            wetter = st.local is None or outdoor.dew_point_c >= st.local.dew_point_c
+            st.ventilation["outdoor_air_wetter_than_local"] = wetter
+            st.ventilation["outdoor_air_would_condense"] = wetter and om <= ss.possible_margin_f + st.uncertainty_f
+            st.ventilation["outdoor_air_risky"] = wetter and om < ss.elevated_margin_f + st.uncertainty_f
         if forecast:
             horizon = [(ts, a) for ts, a in forecast if timedelta(0) < ts - now <= timedelta(hours=12)]
             if horizon:

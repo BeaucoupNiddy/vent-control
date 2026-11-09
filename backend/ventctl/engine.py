@@ -6,7 +6,9 @@ simulator and historical replay all call ``decide()``.
 
 Order of evaluation (first failure wins):
   1. mode (OFF, MANUAL_ON, SCHEDULE, AUTO/SIMULATION)
-  2. hard safety: sensors, switch verification, interlocks, condensation,
+  2. hard safety: sensors, switch verification, interlocks, condensation (would
+     running make a surface wetter: wetter outdoor air reaching a cold surface, or
+     cold air chilling a surface toward the dew point of the air around it),
      thermal limits (minimum basement temperature incl. a conservative
      prediction, pipe freeze warning) -> immediate shutdown, ignores minimum
      on/off timers. Applies to both control policies.
@@ -157,21 +159,28 @@ def decide(
     metrics: dict = {}
     effect: VentilationEffect | None = None
     ind, outd = cond.indoor, cond.outdoor
+    # xa: the air the exhaust fan actually removes (ventilation-path zones). Direction and removal use it;
+    # the RH target and urgency use the aggregate (by default the wettest zone).
+    xa = (cond.exhaust or ind) if ind else None
     if ind and outd:
-        effect = ventilation_effect(ind, outd, fans, config.house, cond.upstairs) if fans else None
+        effect = ventilation_effect(xa, outd, fans, config.house, cond.upstairs) if fans else None
         metrics = {
             "indoor": ind.to_dict(),
             "outdoor": outd.to_dict(),
-            "dewpoint_advantage_f": delta_c_to_f(ind.dew_point_c - outd.dew_point_c),
-            "delta_w_g_per_kg": (ind.w - outd.w) * 1000,
+            "dewpoint_advantage_f": delta_c_to_f(xa.dew_point_c - outd.dew_point_c),
+            "delta_w_g_per_kg": (xa.w - outd.w) * 1000,
             "outdoor_rh_at_basement_temp_pct": outd.rh_at(ind.t_c) * 100,
         }
+        if cond.exhaust is not None:
+            metrics["exhaust_air"] = cond.exhaust.to_dict()
+            metrics["exhaust_label"] = cond.exhaust_label
         if effect and effect.pressurized:
             warnings.append("Intake airflow exceeds exhaust: basement air may be pushed into the house.")
         if effect and effect.conditioned_air_assumed:
             warnings.append(
                 f"Assumes {config.house.conditioned_air_fraction * 100:.0f}% of unbalanced exhaust is "
-                "conditioned air from upstairs (scenario estimate, not measured)."
+                "conditioned air from upstairs (an estimate: assumed, or learned from fan starts once an upstairs "
+                "sensor has enough data)."
             )
     look: tamo.Outlook | None = None
     if ind and outd and effect:
@@ -237,7 +246,7 @@ def decide(
                         interlock[1] if interlock else "None active", hard=True))
 
     # starting needs 0.5°F more margin than continuing, so the fans do not chatter at the safety boundary
-    condensation = _condensation(cond, c.surface_margin_f + (0.0 if state.is_on else 0.5))
+    condensation = _condensation(cond, xa, tres, c.surface_margin_f + (0.0 if state.is_on else 0.5))
     checks.append(Check("condensation", "Condensation margin", condensation[0], condensation[2], hard=True))
 
     thermal_block = _thermal_safety(cond, look, config) if (ind and look) else None
@@ -277,20 +286,16 @@ def decide(
     if interlock:
         reasons.append("SAFETY_INTERLOCK")
         return out(False, interlock[0], f"Fans OFF: {interlock[1]}", safety=True)
-    if condensation[0] is not True:
-        if condensation[0] is False:
-            reasons.append("SURFACE_CONDENSATION_RISK")
+    # None = unverifiable only because outdoor air is wetter; the direction check below turns the fans off then
+    if condensation[0] is False:
+        reasons.append("SURFACE_CONDENSATION_RISK")
         return out(False, condensation[1], f"Fans OFF: {condensation[2]}", safety=True)
     if thermal_block:
         return out(False, thermal_block[0], f"Fans OFF (safety limit): {thermal_block[1]}", safety=True)
-    cnd = (tres.details.get("condensation") or {}) if tres else {}
-    if cnd and cnd["indoor_margin_on_f"] <= 0 and cnd["indoor_margin_on_f"] < cnd["indoor_margin_off_f"]:
-        reasons.append("SURFACE_CONDENSATION_RISK")
-        return out(False, "PREDICTED_SURFACE_CONDENSATION",
-                   f"Fans OFF (safety limit): running would cool surfaces to or below the basement dew point "
-                   f"(predicted margin {cnd['indoor_margin_on_f']:.1f}°F).", safety=True)
 
     assert ind and outd and effect
+    if mode == Mode.SCHEDULE and condensation[0] is None:
+        return out(False, condensation[1], f"Fans OFF: {condensation[2]}", safety=True)
     if mode == Mode.SCHEDULE:
         hour = local_hour if local_hour is not None else now.hour + now.minute / 60
         in_window = any(w.contains(hour) for w in c.schedule)
@@ -305,12 +310,13 @@ def decide(
 
     # ---- AUTO / SIMULATION: drying benefit ------------------------------
     on = state.is_on
-    adv_f = delta_c_to_f(ind.dew_point_c - outd.dew_point_c)
-    dw = ind.w - outd.w
+    adv_f = delta_c_to_f(xa.dew_point_c - outd.dew_point_c)
+    dw = xa.w - outd.w
 
     wetter = dw <= 0
+    at_fan = f" ({cond.exhaust_label} air at the fan)" if cond.exhaust is not None else ""
     checks.append(Check("direction", "Outdoor air drier", not wetter,
-                        f"Outdoor dew point {_fmt_f(outd.dew_point_c)} vs basement {_fmt_f(ind.dew_point_c)}"))
+                        f"Outdoor dew point {_fmt_f(outd.dew_point_c)} vs basement {_fmt_f(xa.dew_point_c)}{at_fan}"))
     if wetter:
         reasons.append("OUTDOOR_AIR_WETTER")
         return out(False, "OUTDOOR_WETTER",
@@ -322,12 +328,19 @@ def decide(
 
     rh_pct = ind.rh * 100
     start_rh = c.target_rh_pct + c.rh_start_deadband_pct
-    rh_ok = rh_pct > c.target_rh_pct if on else rh_pct > start_rh
+    # A strong drying window is rare in New Orleans and the wood and concrete hold far more water than the
+    # air: once running, keep going below the target while outdoor air is much drier.
+    dry_window = adv_f >= c.dry_window_advantage_f
+    stop_rh = min(c.target_rh_pct, c.dry_window_stop_rh_pct) if dry_window else c.target_rh_pct
+    rh_ok = rh_pct > stop_rh if on else rh_pct > start_rh
+    window_txt = (f"; strong drying window ({adv_f:.0f}°F drier outside), running continues to {stop_rh:.0f}%"
+                  if on and dry_window and stop_rh < c.target_rh_pct else "")
     checks.append(Check("rh", "Basement above target", rh_ok,
-                        f"Basement RH {rh_pct:.0f}% vs target {c.target_rh_pct:.0f}%"))
+                        f"Basement RH {rh_pct:.0f}% vs target {c.target_rh_pct:.0f}%{window_txt}"))
     if not rh_ok:
         if on:
-            reason = ("TARGET_REACHED", "Fans OFF: basement humidity has reached the configured target.")
+            reason = ("TARGET_REACHED", "Fans OFF: basement humidity has reached the configured target"
+                      + (f" ({stop_rh:.0f}% during a strong drying window)." if stop_rh < c.target_rh_pct else "."))
         else:
             reason = ("BELOW_TARGET", f"Fans OFF: basement humidity ({rh_pct:.0f}%) is at or near the target "
                                       f"({c.target_rh_pct:.0f}%).")
@@ -381,7 +394,7 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
     removal = effect.net_removal_g_h
     min_rem, e_value = profile_thresholds(config)
     factor = config.control.efficiency_off_factor if on else 1.0
-    dw = (ind.w - look.inlet_w) * 1000
+    dw = ((cond.exhaust or ind).w - look.inlet_w) * 1000
     dw_need = t.min_dw_stop_g_kg if on else t.min_dw_start_g_kg
     dw_ok = dw > dw_need if on else dw >= dw_need
     checks.append(Check("advantage", "Moisture advantage", dw_ok,
@@ -443,7 +456,8 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
                                                       config.house.upstairs_rh_pct / 100.0)
 
         def at(out_air):
-            eff = ventilation_effect(ind, out_air, group_fans(config, group), config.house, cond.upstairs)
+            eff = ventilation_effect(cond.exhaust or ind, out_air, group_fans(config, group), config.house,
+                                     cond.upstairs)
             if eff.net_removal_g_h <= 0:
                 return None
             lk = tamo.outlook(ind, out_air, up_air, eff, config, look.params, False, h, minutes=(int(h),))
@@ -534,25 +548,55 @@ def _interlock(config: AppConfig, fans: list[Fan], cond: Conditions) -> tuple[st
     return None
 
 
-def _condensation(cond: Conditions, margin_f: float) -> tuple[bool | None, str, str]:
-    if cond.surface_c is None:
-        return (None, "CONDENSATION_UNVERIFIED",
-                "condensation safety is unverified. Add a surface sensor or configure a conservative minimum "
-                "surface temperature.")
-    if cond.outdoor is None:
-        return None, "CONDENSATION_UNVERIFIED", "condensation safety cannot be checked without outdoor data."
-    margin = cond.surface_c - cond.outdoor.dew_point_c
+def ventilation_wets_surface(surface_c: float, basement_dp_c: float, outdoor_dp_c: float, margin_c: float) -> bool:
+    """Incoming outdoor air would make a cold surface wetter: it is wetter than the basement air and its
+    dew point is within the margin of (or above) the surface temperature.
+
+    When outdoor air is drier than the basement, ventilation lowers the dew point next to every surface,
+    so the outdoor dew point alone can never make it riskier (the old check compared them anyway and
+    blocked drying exactly when walls were near their dew point).
+    """
+    return outdoor_dp_c >= basement_dp_c and surface_c - outdoor_dp_c < margin_c
+
+
+def _condensation(cond: Conditions, xa: AirState | None, tres: tamo.TamoResult | None,
+                  margin_f: float) -> tuple[bool | None, str, str]:
+    """Would running the fans make a surface wetter? (ok, code, text). ok None = cannot tell."""
+    ind, outd = cond.indoor, cond.outdoor
+    if ind is None or outd is None or xa is None:
+        return None, "CONDENSATION_UNVERIFIED", "condensation safety cannot be checked without indoor and outdoor data."
+    m_c = delta_f_to_c(margin_f)
+    has_surface = cond.surface_c is not None or any(s.get("t_c") is not None for s in cond.surfaces)
     kind = "measured" if cond.surface_source == "measured" else "estimated"
-    if margin < delta_f_to_c(margin_f):
-        if margin < 0:
-            text = (f"outdoor dew point ({_fmt_f(cond.outdoor.dew_point_c)}) is above the {kind} surface "
-                    f"temperature ({_fmt_f(cond.surface_c)}). Condensation risk.")
-        else:
-            text = (f"outdoor dew point ({_fmt_f(cond.outdoor.dew_point_c)}) is within {margin_f:.0f}°F of the "
-                    f"{kind} surface temperature ({_fmt_f(cond.surface_c)}). Condensation risk.")
-        return False, "CONDENSATION_RISK", text
-    return True, "OK", (f"{delta_c_to_f(margin):.1f}°F between {kind} surface ({_fmt_f(cond.surface_c)}) and "
-                        f"outdoor dew point")
+    if has_surface and cond.surface_c is not None and ventilation_wets_surface(cond.surface_c, xa.dew_point_c,
+                                                                               outd.dew_point_c, m_c):
+        rel = "above" if outd.dew_point_c > cond.surface_c else f"within {margin_f:.0f}°F of"
+        return (False, "CONDENSATION_RISK",
+                f"outdoor air is wetter than the basement and its dew point ({_fmt_f(outd.dew_point_c)}) is {rel} "
+                f"the {kind} surface temperature ({_fmt_f(cond.surface_c)}). Condensation risk.")
+    cnd = (tres.details.get("condensation") or {}) if tres else {}
+    if has_surface and cnd:
+        on, off, name = cnd["indoor_margin_on_f"], cnd["indoor_margin_off_f"], cnd.get("worst_surface", "surface")
+        if on < margin_f and on < off - 0.1:
+            return (False, "CONDENSATION_RISK",
+                    f"running would cool {name} to within {on:.1f}°F of the dew point of the air around it "
+                    f"({off:.1f}°F with the fans off). Condensation risk.")
+        return True, "OK", (f"{name}: predicted margin to the local dew point {on:.1f}°F with fans on, "
+                            f"{off:.1f}°F with fans off ({kind} surface)")
+    if has_surface:
+        return True, "OK", f"{kind} surface {_fmt_f(cond.surface_c)}; outdoor air does not raise its dew point"
+    # no surface information
+    if outd.w >= xa.w:
+        return (None, "CONDENSATION_UNVERIFIED",
+                "outdoor air is wetter than the basement and no surface temperature is available to check it "
+                "against. Add a surface sensor or configure a conservative minimum surface temperature.")
+    if outd.t_c < xa.dew_point_c + m_c:
+        return (False, "CONDENSATION_UNVERIFIED",
+                f"outdoor air ({_fmt_f(outd.t_c)}) is cold enough to chill surfaces near where it enters below the "
+                f"basement dew point ({_fmt_f(xa.dew_point_c)}), and no surface sensor is available to check. Add a "
+                "surface sensor or configure a conservative minimum surface temperature.")
+    return True, "OK", (f"No surface sensor; outdoor air is drier and stays above the basement dew point "
+                        f"({_fmt_f(outd.t_c)} vs {_fmt_f(xa.dew_point_c)}), so it cannot wet surfaces")
 
 
 def _finish(state, config, group, mode, target, code, text, immediate, safety, checks, metrics, effect,

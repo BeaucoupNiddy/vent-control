@@ -50,19 +50,48 @@ def test_79f_70pct_vs_74f_dewpoint_is_moisture_addition():
     assert not d.target_on and d.reason_code == "OUTDOOR_WETTER"
 
 
-# 5
-def test_outdoor_dewpoint_above_cold_concrete_blocks_ventilation():
+# 5 (revised in the physics review): outdoor air drier than the basement lowers the dew point next to
+# every surface, so a cold wall is a reason to ventilate, not to block it
+def test_drier_outdoor_air_runs_even_when_concrete_is_near_dew_point():
     d = run(cond(air_f(79, 90), air_f(80, td_f=70), surface_f=68))
+    assert d.target_on and d.reason_code == "DRYING"
+    assert next(ch for ch in d.checks if ch.id == "condensation").ok is True
+
+
+def test_wetter_outdoor_air_near_cold_concrete_is_a_condensation_risk():
+    # the risk is outdoor air WETTER than the basement reaching a cold surface (e.g. a manual run in summer)
+    st = GroupState(manual_until=T0 + minutes(30))
+    d = run(cond(air_f(79, 60), air_f(85, td_f=76), surface_f=74), mode=Mode.MANUAL_ON, state=st)
     assert not d.target_on and d.reason_code == "CONDENSATION_RISK" and d.safety
-    assert "above the measured surface" in d.explanation
-    # within the margin (not above) is also blocked
-    d2 = run(cond(air_f(79, 90), air_f(80, td_f=70), surface_f=72))
-    assert d2.reason_code == "CONDENSATION_RISK"
+    assert "wetter than the basement" in d.explanation
 
 
-def test_no_surface_information_blocks_auto():
+def test_cold_air_chilling_a_surface_toward_local_dew_point_blocks():
+    from ventctl.units import f_to_c
+    ind = air_f(62, td_f=57)
+    c = cond(ind, air_f(40, td_f=36), surface_f=59.8)
+    c.surfaces = [{"name": "pocket wall", "t_c": f_to_c(59.8), "zone": "pocket", "local": ind, "exposure": 0.0}]
+    d = run(c, state=GroupState(is_on=True))
+    assert not d.target_on and d.reason_code == "CONDENSATION_RISK" and d.safety
+    assert "pocket wall" in d.explanation and "fans off" in d.explanation
+
+
+def test_no_surface_sensor_runs_with_warm_dry_air():
     d = run(cond(air_f(79, 90), air_f(80, td_f=60), surface_f=None))
+    assert d.target_on and d.reason_code == "DRYING"
+
+
+def test_no_surface_sensor_blocks_air_cold_enough_to_chill_surfaces():
+    d = run(cond(air_f(70, 70), air_f(50, td_f=35), surface_f=None))
     assert not d.target_on and d.reason_code == "CONDENSATION_UNVERIFIED" and d.safety
+    assert "no surface sensor" in d.explanation
+
+
+def test_no_surface_sensor_and_wetter_outdoor_air_reports_wetter():
+    d = run(cond(air_f(70, 50), air_f(80, td_f=70), surface_f=None))
+    assert not d.target_on and d.reason_code == "OUTDOOR_WETTER"
+    # a scheduled run still fails safe when it cannot be verified
+    assert run(cond(air_f(70, 50), air_f(80, td_f=70), surface_f=None), mode=Mode.SCHEDULE, hour=22).safety
 
 
 def test_estimated_surface_is_labeled():
@@ -107,8 +136,8 @@ def test_minimum_runtime_holds_normal_stop_but_not_safety_stop():
     d = run(cond(indoor, air_f(82, td_f=td_in - 0.5)), cfg, st, now=T0 + minutes(5))
     assert d.target_on and d.held and d.reason_code.startswith("MIN_ON_HOLD")
     assert d.next_eligible_switch == T0 + minutes(15)
-    # condensation -> immediate stop even inside min runtime
-    d2 = run(cond(indoor, air_f(82, td_f=td_in - 6), surface_f=td_in - 6), cfg, st, now=T0 + minutes(5))
+    # condensation (wetter outdoor air reaching a cold surface) -> immediate stop even inside min runtime
+    d2 = run(cond(indoor, air_f(82, td_f=td_in + 1), surface_f=td_in + 2), cfg, st, now=T0 + minutes(5))
     assert not d2.target_on and d2.safety
 
 
@@ -138,13 +167,26 @@ def test_switch_unverified_forces_off():
 def test_target_reached_turns_fans_off_after_min_runtime():
     cfg = config(target_rh_pct=55)
     st = GroupState(is_on=True, last_change=T0)
-    c = cond(air_f(79, 54.5), air_f(75, td_f=50))
+    c = cond(air_f(79, 54.5), air_f(75, td_f=56))  # ~5°F drier outside: an ordinary window
     d = run(c, cfg, st, now=T0 + minutes(20))
     assert not d.target_on and d.reason_code == "TARGET_REACHED"
     assert "reached the configured target" in d.explanation
     # and will not start again just above target (deadband)
     d2 = run(cond(air_f(79, 56), air_f(75, td_f=50)), cfg, GroupState(is_on=False))
     assert not d2.target_on and d2.reason_code == "BELOW_TARGET"
+
+
+def test_strong_drying_window_keeps_running_below_target():
+    # outdoor dew point ~11°F lower: keep drying the wood and concrete down to 50% instead of stopping at 55%
+    cfg = config(target_rh_pct=55)
+    st = GroupState(is_on=True, last_change=T0)
+    d = run(cond(air_f(79, 54.5), air_f(75, td_f=50)), cfg, st, now=T0 + minutes(20))
+    assert d.target_on and d.reason_code == "DRYING"
+    assert "strong drying window" in next(ch for ch in d.checks if ch.id == "rh").detail
+    d = run(cond(air_f(79, 49.5), air_f(75, td_f=48)), cfg, st, now=T0 + minutes(20))
+    assert not d.target_on and d.reason_code == "TARGET_REACHED" and "50%" in d.explanation
+    # it never starts below the normal start point
+    assert run(cond(air_f(79, 54.5), air_f(75, td_f=50)), cfg, GroupState()).reason_code == "BELOW_TARGET"
 
 
 # 11

@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from .airflow import ventilation_effect
 from .climate import ClimateProfile
 from .config import AppConfig, EnergyProfile, Mode
-from .engine import GroupState, decide, group_fans, profile_thresholds
+from .engine import GroupState, decide, group_fans, profile_thresholds, ventilation_wets_surface
 from .psychro import AirState
 from .sensors import Conditions
 from .units import c_to_f, delta_f_to_c, grams_to_gallons
@@ -156,7 +156,7 @@ def replay(rows: list[dict], config: AppConfig, tz) -> dict:
                 kwh += e.total_power_w * h / 1000
                 if e.net_removal_g_h < 0:
                     adding_h += h
-                if surf is not None and surf - out.dew_point_c < margin:
+                if surf is not None and ventilation_wets_surface(surf, ind.dew_point_c, out.dew_point_c, margin):
                     risk_h += h
         results.append({
             "id": pid, "name": name, "runtime_h": on_h, "switch_cycles": cycles,

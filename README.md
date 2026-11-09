@@ -86,19 +86,24 @@ Every 60 seconds, for each fan group:
    - indoor and outdoor readings are current (stale after 5 minutes, or the gateway is unreachable)
    - the fan switch state can be verified
    - interlocks: water-intrusion lockout, combustion-appliance lockout for exhaust-only setups, and a depressurization limit if a pressure sensor exists
-   - **condensation:** `coldest surface − outdoor dew point ≥ margin` (3 °F). If there is no surface sensor and no user-approved conservative surface estimate, automatic ventilation stays off and the app says condensation safety is unverified.
+   - **condensation:** would running make a surface wetter? Two ways it can:
+     - outdoor air that is *wetter* than the basement reaches a cold surface (outdoor dew point within the 3 °F margin of the coldest surface). Drier outdoor air lowers the dew point next to every surface, so it never trips this.
+     - cold air chills a surface toward the dew point of the air around it: the predicted margin with fans on is below 3 °F and worse than with fans off.
+     - with no surface sensor and no conservative surface estimate, auto still runs with drier outdoor air that stays warmer than the basement dew point plus the margin, and blocks air cold enough to chill surfaces where it enters.
 3. **Direction.** If outdoor air holds more moisture (ΔW ≤ 0), the fans stop immediately, because running them adds water.
 4. **Benefit**, with hysteresis and minimum on/off times:
-   - basement RH is above target (start at target + 2 %, stop at target)
+   - basement RH is above target (start at target + 2 %, stop at target). During a strong drying window (outdoor dew point ≥ 8 °F lower) a running fan keeps going down to 50 %, because the wood and concrete hold far more water than the air and stopping at the air target leaves it in them
    - dew-point advantage: start at ≥ 3 °F, keep running while > 1 °F
-   - estimated removal = dry-air mass flow × (W_basement − W_incoming) must exceed a minimum
+   - estimated removal = dry-air mass flow × (W_basement − W_incoming) must exceed a minimum. W_basement is the air at the fan (the ventilation-path zones), not the wettest zone
    - efficiency = net removal ÷ (fan watts + extra HVAC watts to replace conditioned air pulled from upstairs) must clear the energy profile's threshold. Maximum Drying has no minimum. Balanced needs 1,500 g/kWh and Energy Saver 5,000 g/kWh. The stop threshold is 70 % of the start threshold.
 
 It never runs fans just because the basement is humid. A 90 % basement with outdoor air that would be 80 % at basement temperature still runs, because that is a real drying benefit. A 65 % basement with outdoor air that would be 85 % stays off.
 
 ### Airflow model
 
-Exhaust fans push basement air out. When exhaust exceeds intake, a configurable fraction of the shortfall is assumed to come from the conditioned upstairs through the floor (10 % by default). The rest comes from outdoors through the vents. Air drawn from upstairs is replaced upstairs by outdoor air, which the AC has to cool and dry. That cost is the "conditioned-air penalty" (enthalpy difference ÷ COP). The upstairs fraction is always shown as an assumption, because nothing measures it yet.
+Exhaust fans push basement air out. When exhaust exceeds intake, a configurable fraction of the shortfall is assumed to come from the conditioned upstairs through the floor (10 % by default). The rest comes from outdoors through the vents. Air drawn from upstairs is replaced upstairs by outdoor air, which the AC has to cool and dry. That cost is the "conditioned-air penalty" (enthalpy difference ÷ COP). It is charged only while the HVAC is assumed to run (heating below 55 °F outdoors, AC above 78 °F, both adjustable). On mild days with heat and AC off the house floats and the replacement air costs nothing.
+
+The upstairs fraction starts as an assumption. With an upstairs T/RH sensor the app learns it from fan starts: just after a start, the basement's moisture trend changes by what the fan air brings in, and comparing days when upstairs air is drier or wetter than outdoor air separates the two paths (`calibration.fit_upstairs_fraction`). Once the estimate reaches medium confidence it replaces the assumption (Diagnostics shows both).
 
 ### Psychrometrics
 
@@ -113,7 +118,7 @@ M·dW/dt = fan outdoor flow·(W_out−W) + fan upstairs flow·(W_up−W) + infil
           + moisture sources − dehumidifier + buffer exchange − condensation
 ```
 
-- The **buffer** is a simple wood and concrete reservoir: flux to the air = (S − capacity·RH) ÷ τ. Set capacity to 0 to turn it off.
+- The **buffer** is a simple wood and concrete reservoir: flux to the air = (S − capacity·RH) ÷ τ. Set capacity to 0 to turn it off. The default is 400 kg with τ = 36 h: the air in 24,000 ft³ holds only about 10 kg of water, while the floor framing, subfloor and concrete exchange hundreds of kilograms between dry and humid seasons. Installs that still had the old 25 kg / 12 h defaults are moved to the new ones once.
 - Basement **temperature** uses the same two-node air and structure model as the live controller (see TAMO below). The structure relaxes toward a daily profile, and RH is always derived from W at the simulated temperature.
 - Vapor above saturation condenses and is tracked. Every flow goes into a ledger, and the tests check mass conservation to 1e-6 kg.
 
@@ -191,7 +196,7 @@ These block or stop the fans regardless of utility and minimum run times:
 
 - **Minimum basement temperature** (55 °F by default), checked with a *conservative* prediction: thermal parameters pushed toward a bigger temperature drop by their uncertainty, at the decision horizon plus one decision interval (at least 60 minutes while confidence is low).
 - **Pipe freeze.** A sensor with role `pipe` blocks cold-air runs below the freeze warning (40 °F) plus the sensor margin. Without one, the Dashboard says pipes near vents aren't monitored, and the min-temperature limit only protects the basement air on average.
-- **Surface condensation:** the original outdoor-dew-point check, plus a block when the predicted basement dew point would reach the coldest surface.
+- **Surface condensation:** see the condensation rule above (wetter outdoor air reaching a cold surface, or cold air chilling a surface toward its local dew point). The surface is assumed to follow 20 % of the air-temperature change within the horizon until fan cycles teach the real value (concrete is slow).
 
 If RH stays above 70 % for 3 hours and no safe drying exists, the app raises an alert that recommends a dehumidifier.
 

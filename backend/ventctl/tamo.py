@@ -165,7 +165,7 @@ class TamoResult:
 
 def evaluate(indoor: AirState, outdoor: AirState, effect: VentilationEffect, look: Outlook, config: AppConfig,
              is_on: bool, surface_c: float | None, energy_value_g_kwh: float, want_on: bool = True,
-             surfaces: list[dict] | None = None, air_follow: float = 0.5) -> TamoResult:
+             surfaces: list[dict] | None = None, air_follow: float = 0.2) -> TamoResult:
     t = config.temperature
     h = t.horizon_min
     hrs = h / 60
@@ -206,7 +206,7 @@ def evaluate(indoor: AirState, outdoor: AirState, effect: VentilationEffect, loo
 
     # condensation risk from predicted surface temperature and predicted LOCAL dew point.
     # Surface response: it follows a fraction f of the air-temperature change within the horizon
-    # (learned from fan cycles; 0.5 assumed, which is conservative for cold air) plus the slow structure change.
+    # (learned from fan cycles; 0.2 assumed, a cautious value for slow concrete) plus the slow structure change.
     risk = 0.0
     cond: dict = {}
     f = air_follow

@@ -34,7 +34,7 @@ from . import coupled, psychro, thermal
 from .airflow import ventilation_effect
 from .climate import ClimateProfile
 from .config import AppConfig, ControlPolicy, EnergyProfile, Fan, FanGroup, FanType, Mode
-from .engine import GroupState, decide
+from .engine import GroupState, decide, ventilation_wets_surface
 from .psychro import AirState
 from .sensors import Conditions
 from .units import (
@@ -62,8 +62,8 @@ class SimParams(BaseModel):
     conditioned_air_fraction: float = Field(0.10, ge=0, le=1)
     surface_temp_f: float | None = Field(None, description="Coldest surface; defaults to the profile's suggestion")
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
-    buffer_capacity_kg: float = Field(25, ge=0, description="Moisture the materials exchange between 0% and 100% RH")
-    buffer_tau_h: float = Field(12, gt=0.1)
+    buffer_capacity_kg: float = Field(400, ge=0, description="Moisture the materials exchange between 0% and 100% RH")
+    buffer_tau_h: float = Field(36, gt=0.1)
     dehumidifier: bool = False
     dehumidifier_pints_day: float = Field(35, ge=0)
     dehumidifier_w: float = Field(500, ge=0)
@@ -374,7 +374,7 @@ def run_strategy(strategy: str, params: SimParams, profile: ClimateProfile, base
                 useful_on_h += hrs
             else:
                 unfavorable_on_h += hrs
-            if model.surface_c - out.dew_point_c < margin_c:
+            if ventilation_wets_surface(model.surface_c, model.air().dew_point_c, out.dew_point_c, margin_c):
                 cond_risk_h += hrs
         if k % out_every == 0 or k == steps - 1:
             a = model.air()
@@ -477,7 +477,7 @@ def insights(results: list[StrategyResult]) -> list[str]:
     risky = [r for r in results if r.summary["condensation_risk_hours"] > 0.05]
     if risky:
         names = ", ".join(f"{r.name} ({r.summary['condensation_risk_hours']:.1f} h)" for r in risky)
-        out.append(f"Ran fans while outdoor dew point was within the condensation margin of the surface: {names}. "
+        out.append(f"Ran fans while incoming outdoor air was wetter than the basement and near the surface dew point: {names}. "
                    "Removing the most moisture is not the same as being safe.")
     adders = [r for r in results if r.summary["fan_outdoor_removed_kg"] < -0.01]
     if adders:
