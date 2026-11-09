@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card } from "../components";
+import { ZoneSettings } from "./SettingsZones";
 
 function get(o: Json, path: string) {
   return path.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
@@ -81,6 +82,45 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "control.combustion_interlock", label: "Block exhaust-only (gas appliance present)", type: "bool" },
     { path: "control.max_depressurization_pa", label: "Max basement depressurization (Pa)", nullable: true, hint: "Needs a pressure sensor; blank = off" },
     { path: "switches.hardware_max_on_minutes", label: "Plug dead-man timer (min)", nullable: true, hint: "The plug turns itself off this long after ON unless the controller re-arms it. Protects against controller failure. Blank = off." },
+  ] },
+  { title: "Internal Air Circulation", note: "Controls the circulation fans. Start in Shadow mode: the controller logs what it would do without switching anything, while it learns how your zones respond. Automatic mode only switches fans marked commissioned. Circulation moves water between zones; it never counts as moisture removal.", fields: [
+    { path: "circulation.mode", label: "Circulation automation", type: "select", options: [["off", "Off"], ["shadow", "Shadow (log only)"], ["auto", "Automatic (commissioned fans)"]] },
+    { path: "circulation.min_on_minutes", label: "Minimum ON time (min)" },
+    { path: "circulation.min_off_minutes", label: "Minimum OFF time (min)" },
+    { path: "circulation.observe_rh_pct", label: "Observe zone RH (%)" },
+    { path: "circulation.elevated_rh_pct", label: "Elevated zone RH (%)" },
+    { path: "circulation.high_rh_pct", label: "High-priority RH (%)" },
+    { path: "circulation.critical_rh_pct", label: "Critical RH alert (%)" },
+    { path: "circulation.elevated_persist_min", label: "Elevated must persist (min)" },
+    { path: "circulation.high_persist_min", label: "High must persist (min)" },
+    { path: "circulation.critical_persist_min", label: "Critical alert after (min)" },
+    { path: "circulation.rh_hysteresis_pct", label: "RH hysteresis (%)", step: 0.5 },
+    { path: "circulation.min_dw_start_g_kg", label: "Moisture difference to start (g/kg)", step: 0.1 },
+    { path: "circulation.min_dw_stop_g_kg", label: "Moisture difference to keep running (g/kg)", step: 0.1 },
+    { path: "circulation.min_rh_improvement_pct", label: "Min predicted RH improvement (%)", step: 0.5 },
+    { path: "circulation.rh_uncertainty_pct", label: "Sensor RH uncertainty, uncalibrated (%)", step: 0.5 },
+    { path: "circulation.rh_uncertainty_calibrated_pct", label: "Sensor RH uncertainty, after comparison (%)", step: 0.5 },
+    { path: "circulation.temp_uncertainty_f", label: "Sensor temperature uncertainty (°F)", step: 0.1 },
+    { path: "circulation.ventilation_support", label: "Support exterior ventilation (assigned fans)", type: "bool" },
+    { path: "circulation.post_ventilation_min", label: "Keep running after ventilation (min)" },
+    { path: "circulation.condensation_aware", label: "Condensation-aware circulation", type: "bool" },
+    { path: "circulation.periodic_mixing", label: "Periodic mixing (experimental)", type: "bool" },
+    { path: "circulation.mixing_on_min", label: "Mixing: run (min)" },
+    { path: "circulation.mixing_off_min", label: "Mixing: rest (min)" },
+    { path: "circulation.energy_optimization", label: "Energy optimization", type: "bool", hint: "Skip circulation when every zone is below the observe threshold" },
+    { path: "circulation.manual_override_minutes", label: "Manual override duration (min)" },
+  ] },
+  { title: "Concrete surface", note: "Risk classes use the conservative margin: surface temperature minus local dew point, minus the combined probe and dew-point uncertainty. A reading 0.5°F above the dew point is not treated as safe.", fields: [
+    { path: "surfaces.monitor_margin_f", label: "Monitor below margin (°F)", step: 0.5 },
+    { path: "surfaces.elevated_margin_f", label: "Elevated risk below (°F)", step: 0.5 },
+    { path: "surfaces.possible_margin_f", label: "Condensation possible at or below (°F)", step: 0.5 },
+    { path: "surfaces.probe_uncertainty_f", label: "Probe uncertainty (°F)", step: 0.1, hint: "Ecowitt WN30: about ±2°F stated; ±1°F after a check against a reference" },
+    { path: "surfaces.dew_point_uncertainty_f", label: "Local dew-point uncertainty (°F)", step: 0.1 },
+    { path: "surfaces.hysteresis_f", label: "Hysteresis (°F)", step: 0.1 },
+    { path: "surfaces.advisory_sustain_min", label: "Advisory after sustained (min)" },
+    { path: "surfaces.surface_rh_elevated_pct", label: "Track surface RH above (%)" },
+    { path: "surfaces.persistent_hours", label: "Persistent risk after (h)", step: 0.5 },
+    { path: "surfaces.air_follow_fraction", label: "Surface follows air change (0–1)", nullable: true, step: 0.05, hint: "Blank = learn from data (0.5 until confident)" },
   ] },
   { title: "Sensors", fields: [
     { path: "sensors.poll_seconds", label: "Polling interval (s)" },
@@ -168,6 +208,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
       </Card>
       <Hardware cfg={cfg} change={change} />
       <Groups cfg={cfg} change={change} />
+      <ZoneSettings cfg={cfg} change={change} />
       {SECTIONS.map((s) => (
         <Card key={s.title} title={s.title}>
           {s.note && <p className="note">{s.note}</p>}
@@ -202,7 +243,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
           {s.title === "Sensors" && (
             <div className="table-wrap" style={{ marginTop: 16 }}>
               <table>
-                <thead><tr><th>Sensor id</th><th>Name</th><th>Location</th><th>Zone</th><th>Temp offset (°F)</th><th>RH offset (%)</th><th>Enabled</th></tr></thead>
+                <thead><tr><th>Sensor id</th><th>Name</th><th>Location</th><th>Zone</th><th>Temp offset (°F)</th><th>RH offset (%)</th><th>Calibrated</th><th>Enabled</th></tr></thead>
                 <tbody>
                   {cfg.sensors.mappings.map((m: Json, i: number) => (
                     <tr key={m.sensor_id}>
@@ -210,15 +251,19 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
                       <td><input value={m.name} onChange={(e) => mapChange(i, "name", e.target.value)} /></td>
                       <td><select value={m.role} onChange={(e) => mapChange(i, "role", e.target.value)}>
                         {["outdoor", "basement", "surface", "pipe", "upstairs", "pressure", "ignore"].map((r) => <option key={r}>{r}</option>)}</select></td>
-                      <td><input value={m.zone ?? ""} style={{ width: 80 }} onChange={(e) => mapChange(i, "zone", e.target.value || null)} /></td>
+                      <td>{cfg.zones?.length ? (
+                        <select value={m.zone ?? ""} onChange={(e) => mapChange(i, "zone", e.target.value || null)}>
+                          <option value="">none</option>{cfg.zones.map((z: Json) => <option key={z.id} value={z.id}>{z.name}</option>)}</select>
+                      ) : <input value={m.zone ?? ""} style={{ width: 80 }} onChange={(e) => mapChange(i, "zone", e.target.value || null)} />}</td>
                       <td><input type="number" step={0.1} style={{ width: 70 }} value={m.temp_offset_f} onChange={(e) => mapChange(i, "temp_offset_f", Number(e.target.value))} /></td>
                       <td><input type="number" step={0.5} style={{ width: 70 }} value={m.rh_offset_pct} onChange={(e) => mapChange(i, "rh_offset_pct", Number(e.target.value))} /></td>
+                      <td className="faint">{m.calibrated_at ? new Date(m.calibrated_at).toLocaleDateString() : "—"}</td>
                       <td><input type="checkbox" checked={m.enabled} onChange={(e) => mapChange(i, "enabled", e.target.checked)} /></td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-              <p className="faint">Calibrate by placing all sensors together for a few hours and entering the offsets that make them agree with your best reference.</p>
+              <p className="faint">Zone sets which basement area a sensor (or concrete probe) represents. To calibrate, use the side-by-side comparison on the Diagnostics page: it suggests offsets and records when they were applied. Raw readings are always kept.</p>
             </div>
           )}
         </Card>

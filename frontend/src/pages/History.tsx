@@ -3,6 +3,7 @@ import { api, Json } from "../api";
 import { Card, Stat, TimeChart, fanIntervals } from "../components";
 import { hours, num, pct, tempVal, useUnit } from "../units";
 import { POLICY_NAMES } from "./Tamo";
+import { ZoneHistory } from "./Zones";
 
 const RANGES = [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["custom", "Custom"]];
 
@@ -169,6 +170,8 @@ export default function History() {
             series={[{ key: "power", name: "Power", color: "var(--series-1)" }]} /></Card>
         </div>
       )}
+
+      {rows.length > 0 && <ZoneHistory rawRows={data?.rows || []} range={range} xf={xf} fan={fan} />}
 
       <div className="grid g2">
         <Card title="Shadow comparison" right={<span className="badge modeled">recorded decisions</span>}>

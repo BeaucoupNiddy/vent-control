@@ -30,7 +30,22 @@ class MockWorld:
                            surface_temp_f=75.5, conditioned_air_fraction=config.house.conditioned_air_fraction,
                            coupling_w_k=1500,  # the mock basement's "true" value differs from the default assumption
                            volume_ft3=config.house.basement_volume_ft3)
-        self.model = BasementModel(params, self.profile, [], config.house)
+        self.mz = None
+        if len(config.zones) >= 2 and config.connections:
+            from ..config import SensorRole
+            from ..zonesim import MultiZoneModel
+            probe_zone = next((m.zone for m in config.sensors.mappings
+                               if m.role == SensorRole.SURFACE and m.zone in {z.id for z in config.zones}), None)
+            # the mock basement's "true" layout: the remote zones run cooler and damper than the main area
+            self.mz = MultiZoneModel(params, self.profile, [], config.house, config.zones, config.connections,
+                                     config.circulators, surface_zone=probe_zone,
+                                     zone_temp_offsets_f={z.id: -1.0 - 1.5 * i for i, z in
+                                                          enumerate(z for z in config.zones if not z.on_ventilation_path)},
+                                     zone_rh_offsets_pct={z.id: 4.0 + 3 * i for i, z in
+                                                          enumerate(z for z in config.zones if not z.on_ventilation_path)})
+            self.model = self.mz.main
+        else:
+            self.model = BasementModel(params, self.profile, [], config.house)
         self.t = start
         # profile hour 0 = local midnight of the start day
         local = start.astimezone(self.tz)
@@ -41,6 +56,12 @@ class MockWorld:
         self.switch_faults: dict[str, str] = {}  # switch id -> "unreachable" | "stuck"
         self.gateway_down = False
 
+    def set_surface_c(self, t_c: float) -> None:
+        """Force the mock surface temperature (tests and Diagnostics)."""
+        self.model.surface_c = t_c
+        if self.mz is not None and self.mz.surface is not None:
+            self.mz.surface.t_c = t_c
+
     def profile_hour(self, t: datetime) -> float:
         return (t.astimezone(self.tz) - self.epoch).total_seconds() / 3600
 
@@ -48,7 +69,11 @@ class MockWorld:
         step = timedelta(seconds=60)
         while self.t + step <= now:
             on_fans = [f for f in self.config.fans if f.enabled and self.switch_on.get(f.switch_id)]
-            self.model.step(self.profile_hour(self.t), 60, on_fans)
+            if self.mz is not None:
+                circ = {c.id: bool(c.enabled and self.switch_on.get(c.switch_id)) for c in self.config.circulators}
+                self.mz.step(self.profile_hour(self.t), 60, on_fans, circ)
+            else:
+                self.model.step(self.profile_hour(self.t), 60, on_fans)
             self.t += step
 
     def _noise(self, s: float) -> float:
@@ -67,6 +92,16 @@ class MockWorld:
             "mock-slab": (m.surface_c + 0.3 * (a.t_c - m.mean_t_c), None),
             "mock-up": (up_t, self.config.house.upstairs_rh_pct),
         }
+        if self.mz is not None:
+            from ..config import SensorRole
+            for mp in self.config.sensors.mappings:
+                if not mp.sensor_id.startswith("mock-"):
+                    continue
+                if mp.role == SensorRole.BASEMENT and mp.zone in self.mz._ids():
+                    za = self.mz.zone_air(mp.zone)
+                    vals[mp.sensor_id] = (za.t_c, za.rh * 100)
+                elif mp.role == SensorRole.SURFACE and self.mz.surface is not None and mp.zone == self.mz.surface.zone:
+                    vals[mp.sensor_id] = (self.mz.surface.t_c, None)
         res = []
         for sid, (t, rh) in vals.items():
             if sid in self.sensor_faults:
@@ -92,8 +127,8 @@ class MockSensors(SensorSource):
         return self.world.readings(self.clock.now())
 
     async def discover(self) -> list[dict]:
-        return [{"id": s, "kind": "temp_rh"} for s in ("mock-out", "mock-bsmt-1", "mock-bsmt-2", "mock-up")] + [
-            {"id": "mock-slab", "kind": "temp"}]
+        return [{"id": s, "kind": "temp_rh"} for s in ("mock-out", "mock-bsmt-1", "mock-bsmt-2", "mock-bsmt-3",
+                                                        "mock-up")] + [{"id": "mock-slab", "kind": "temp"}]
 
 
 class MockSwitches(SwitchController):
@@ -103,7 +138,8 @@ class MockSwitches(SwitchController):
 
     def _power(self, sid: str) -> float:
         fans = [f for f in self.world.config.fans if f.switch_id == sid]
-        return sum(f.rated_w for f in fans) * (1 + self.world.rng.gauss(0, 0.02))
+        circs = [c for c in self.world.config.circulators if c.switch_id == sid]
+        return (sum(f.rated_w for f in fans) + sum(c.rated_w for c in circs)) * (1 + self.world.rng.gauss(0, 0.02))
 
     async def get(self, switch_id: str) -> SwitchStatus:
         if self.world.switch_faults.get(switch_id) == "unreachable":

@@ -19,7 +19,10 @@ not captures from Patrick's gateway.
 Channel ids:
   ecowitt:outdoor      outdoor temp/humidity (WS sensor array / WN32)
   ecowitt:indoor       the gateway's own temp/humidity sensor
-  ecowitt:ch1..ch8     WN31 / WN31S channels
+  ecowitt:ch1..ch8     WN31 / WN31S channels, and WN30 / WN30BL probes, which share the
+                       same 8-channel pool. A WN30 reports temperature only (humidity is
+                       absent or "--"); map it with role "surface" or "pipe". Accuracy is
+                       about +/-1 C (+/-2 F), which the surface margin classes allow for.
   ecowitt:tf1..tf8     WN34 probes (good for surface temperature)
 """
 

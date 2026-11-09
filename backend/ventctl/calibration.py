@@ -208,6 +208,32 @@ def thermal_cycles(rows: list[dict], horizon_min: float = 30) -> list[dict]:
     return cycles
 
 
+def path_zone_rows(rows: list[dict], config: AppConfig) -> tuple[list[dict], float]:
+    """Use only the zones the exterior fans ventilate directly.
+
+    With zones configured, remote pockets barely respond to a fan start, so averaging them in
+    would hide the response. Returns rows whose indoor temperature/RH come from the
+    ventilation-path zones (volume-weighted), and the volume those zones hold.
+    """
+    path = [z for z in config.zones if z.on_ventilation_path]
+    if not path or len(path) == len(config.zones):
+        return rows, config.house.basement_volume_ft3
+    vol = sum(z.volume_ft3 for z in path)
+    out = []
+    for r in rows:
+        zs = r.get("zones") or {}
+        got = [(z, zs[z.id]) for z in path if isinstance(zs.get(z.id), dict) and zs[z.id].get("t_c") is not None
+               and zs[z.id].get("rh") is not None]
+        if not got:
+            out.append(r)
+            continue
+        wsum = sum(z.volume_ft3 for z, _ in got)
+        t = sum(z.volume_ft3 * v["t_c"] for z, v in got) / wsum
+        rh = sum(z.volume_ft3 * v["rh"] for z, v in got) / wsum
+        out.append({**r, "indoor_t_c": t, "indoor_rh": rh * 100 if rh <= 1.5 else rh})
+    return out, vol
+
+
 def fit_thermal(rows: list[dict], config: AppConfig, horizon_min: float = 30) -> dict:
     """Fit the air-to-structure coupling H of the two-node model to observed fan starts.
 
@@ -221,7 +247,11 @@ def fit_thermal(rows: list[dict], config: AppConfig, horizon_min: float = 30) ->
     from .psychro import AirState
     from .units import f_to_c
 
-    base = thermal.default_params(config.house.basement_volume_ft3, None, config.temperature.structure_heat_capacity_mj_k,
+    rows, vol = path_zone_rows(rows, config)
+    full = config.house.basement_volume_ft3
+    if vol != full:
+        config = config.model_copy(update={"house": config.house.model_copy(update={"basement_volume_ft3": vol})})
+    base = thermal.default_params(vol, None, config.temperature.structure_heat_capacity_mj_k,
                                   config.temperature.structure_tau_h)
     fans = group_fans(config, config.groups[0]) if config.groups else []
     up = AirState.from_t_rh(f_to_c(config.house.upstairs_temp_f), config.house.upstairs_rh_pct / 100)
@@ -266,7 +296,7 @@ def fit_thermal(rows: list[dict], config: AppConfig, horizon_min: float = 30) ->
     n = len(estimates)
     res: dict = {
         "kind": "thermal_calibration", "version": THERMAL_MODEL_VERSION, "cycles_found": len(cycles),
-        "cycles_used": n, "assumed_coupling_w_k": base.coupling_w_k,
+        "cycles_used": n, "assumed_coupling_w_k": base.coupling_w_k, "fit_volume_ft3": vol,
         "label": "Estimated from recorded fan cycles. Weather, sun and upstairs HVAC also change basement "
                  "temperature, so treat this as approximate.",
         "observed": {

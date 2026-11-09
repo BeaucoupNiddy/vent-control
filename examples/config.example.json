@@ -27,7 +27,46 @@
     ],
     "water_intrusion_lockout": false,
     "combustion_interlock": false,
-    "zone_aggregation": "wettest"
+    "zone_aggregation": "wettest",
+    "policy": "moisture",
+    "shadow_evaluation": true
+  },
+  "temperature": {
+    "preferred_min_f": 65.0,
+    "preferred_max_f": 78.0,
+    "soft_tolerance_f": 5.0,
+    "min_allowed_f": 55.0,
+    "freeze_warning_f": 40.0,
+    "sensor_margin_f": 0.5,
+    "sensitivity": "medium",
+    "custom_sensitivity_g_h": 3000.0,
+    "penalty_exponent": 2.0,
+    "change_tolerance_f": 1.0,
+    "swing_weight": 0.5,
+    "horizon_min": 30.0,
+    "urgency_enabled": true,
+    "urgency_low_rh_pct": 50.0,
+    "urgency_high_rh_pct": 70.0,
+    "urgency_relaxation": 0.8,
+    "min_dw_start_g_kg": 0.6,
+    "min_dw_stop_g_kg": 0.25,
+    "utility_start_g_h": 150.0,
+    "utility_stop_g_h": 0.0,
+    "switch_cost_g_h": 25.0,
+    "risk_weight_g_h": 200.0,
+    "condensation_caution_f": 5.0,
+    "condensation_concern_f": 2.0,
+    "learning_enabled": true,
+    "learning_confidence": "conservative",
+    "air_structure_coupling_w_k": null,
+    "structure_heat_capacity_mj_k": null,
+    "structure_tau_h": 12.0,
+    "forecast_enabled": true,
+    "forecast_latitude": 29.95,
+    "forecast_longitude": -90.07,
+    "forecast_horizon_h": 4.0,
+    "max_deferral_min": 120.0,
+    "forecast_max_urgency": 0.6
   },
   "house": {
     "conditioned_air_fraction": 0.1,
@@ -37,7 +76,12 @@
     "heating_cop": 1.0,
     "electricity_cost_per_kwh": 0.13,
     "natural_ach": 0.3,
-    "basement_volume_ft3": 24000
+    "basement_volume_ft3": 24000.0,
+    "moisture_source_pints_day": 6.0,
+    "moisture_buffer_kg": 25.0,
+    "moisture_buffer_tau_h": 12.0,
+    "elevation_ft": 0.0,
+    "site_pressure_kpa": null
   },
   "fans": [
     {
@@ -65,11 +109,138 @@
     "name": "Dehumidifier",
     "setpoint_rh_pct": 50.0,
     "rated_w": 500.0,
-    "removal_pints_per_day": 35.0
+    "removal_pints_per_day": 35.0,
+    "monitor_switch_id": "",
+    "running_threshold_w": 60.0,
+    "require_ventilation_beats_dehumidifier": false
+  },
+  "zones": [
+    {
+      "id": "main",
+      "name": "Main basement",
+      "volume_ft3": 16000.0,
+      "on_ventilation_path": true,
+      "ventilation_exposure": 1.0,
+      "moisture_source_share": 0.5,
+      "notes": ""
+    },
+    {
+      "id": "pocket",
+      "name": "Remote pocket",
+      "volume_ft3": 4500.0,
+      "on_ventilation_path": false,
+      "ventilation_exposure": 0.4,
+      "moisture_source_share": 0.2,
+      "notes": ""
+    },
+    {
+      "id": "damp",
+      "name": "Moisture-prone area",
+      "volume_ft3": 3500.0,
+      "on_ventilation_path": false,
+      "ventilation_exposure": 0.25,
+      "moisture_source_share": 0.3,
+      "notes": ""
+    }
+  ],
+  "connections": [
+    {
+      "id": "main-pocket",
+      "zone_a": "main",
+      "zone_b": "pocket",
+      "circulator_id": "circ-1",
+      "direction": "a_to_b",
+      "natural_cfm": 15.0,
+      "fan_exchange_cfm": 60.0,
+      "unobstructed": true,
+      "placement": "corridor"
+    },
+    {
+      "id": "pocket-damp",
+      "zone_a": "pocket",
+      "zone_b": "damp",
+      "circulator_id": "circ-2",
+      "direction": "a_to_b",
+      "natural_cfm": 10.0,
+      "fan_exchange_cfm": 60.0,
+      "unobstructed": true,
+      "placement": "doorway"
+    }
+  ],
+  "circulators": [
+    {
+      "id": "circ-1",
+      "name": "Circulation fan 1",
+      "model": "Honeywell HT-900",
+      "switch_id": "mock-plug-2",
+      "location": "Main passage",
+      "physical_speed": "medium",
+      "rated_w": 30.0,
+      "ventilation_support": true,
+      "auto_enabled": true,
+      "commissioned": false,
+      "enabled": true
+    },
+    {
+      "id": "circ-2",
+      "name": "Circulation fan 2",
+      "model": "Honeywell HT-900",
+      "switch_id": "mock-plug-3",
+      "location": "Moisture-prone area",
+      "physical_speed": "low",
+      "rated_w": 30.0,
+      "ventilation_support": false,
+      "auto_enabled": true,
+      "commissioned": false,
+      "enabled": true
+    }
+  ],
+  "circulation": {
+    "mode": "shadow",
+    "min_on_minutes": 15.0,
+    "min_off_minutes": 10.0,
+    "observe_rh_pct": 55.0,
+    "elevated_rh_pct": 60.0,
+    "high_rh_pct": 65.0,
+    "critical_rh_pct": 70.0,
+    "elevated_persist_min": 30.0,
+    "high_persist_min": 15.0,
+    "critical_persist_min": 60.0,
+    "rh_hysteresis_pct": 2.0,
+    "min_dw_start_g_kg": 0.6,
+    "min_dw_stop_g_kg": 0.3,
+    "min_rh_improvement_pct": 1.0,
+    "rh_uncertainty_pct": 3.0,
+    "rh_uncertainty_calibrated_pct": 1.5,
+    "temp_uncertainty_f": 0.5,
+    "horizon_min": 30.0,
+    "ventilation_support": true,
+    "post_ventilation_min": 15.0,
+    "condensation_aware": true,
+    "periodic_mixing": false,
+    "mixing_on_min": 10.0,
+    "mixing_off_min": 30.0,
+    "mixing_windows": [],
+    "mixing_fans": [],
+    "energy_optimization": true,
+    "manual_override_minutes": 60.0
+  },
+  "surfaces": {
+    "monitor_margin_f": 5.0,
+    "elevated_margin_f": 3.0,
+    "possible_margin_f": 0.0,
+    "probe_uncertainty_f": 1.0,
+    "dew_point_uncertainty_f": 1.0,
+    "hysteresis_f": 0.5,
+    "advisory_sustain_min": 30.0,
+    "surface_rh_elevated_pct": 80.0,
+    "persistent_hours": 6.0,
+    "air_follow_fraction": null
   },
   "sensors": {
     "provider": "mock",
     "ecowitt_host": "",
+    "ecowitt_push": true,
     "poll_seconds": 60.0,
     "stale_minutes": 5.0,
     "mappings": [
@@ -80,7 +251,8 @@
         "zone": null,
         "temp_offset_f": 0.0,
         "rh_offset_pct": 0.0,
-        "enabled": true
+        "enabled": true,
+        "calibrated_at": null
       },
       {
         "sensor_id": "mock-bsmt-1",
@@ -89,25 +261,38 @@
         "zone": "main",
         "temp_offset_f": 0.0,
         "rh_offset_pct": 0.0,
-        "enabled": true
+        "enabled": true,
+        "calibrated_at": null
       },
       {
         "sensor_id": "mock-bsmt-2",
-        "name": "Basement room 2",
+        "name": "Remote pocket",
         "role": "basement",
-        "zone": "room2",
+        "zone": "pocket",
         "temp_offset_f": 0.0,
         "rh_offset_pct": 0.0,
-        "enabled": true
+        "enabled": true,
+        "calibrated_at": null
+      },
+      {
+        "sensor_id": "mock-bsmt-3",
+        "name": "Moisture-prone area",
+        "role": "basement",
+        "zone": "damp",
+        "temp_offset_f": 0.0,
+        "rh_offset_pct": 0.0,
+        "enabled": true,
+        "calibrated_at": null
       },
       {
         "sensor_id": "mock-slab",
-        "name": "Concrete slab (NE corner)",
+        "name": "Foundation wall \u2014 northwest",
         "role": "surface",
-        "zone": null,
+        "zone": "damp",
         "temp_offset_f": 0.0,
         "rh_offset_pct": 0.0,
-        "enabled": true
+        "enabled": true,
+        "calibrated_at": null
       },
       {
         "sensor_id": "mock-up",
@@ -116,15 +301,26 @@
         "zone": null,
         "temp_offset_f": 0.0,
         "rh_offset_pct": 0.0,
-        "enabled": true
+        "enabled": true,
+        "calibrated_at": null
       }
     ]
+  },
+  "homeassistant": {
+    "url": "",
+    "token": "",
+    "sensor_entities": {}
   },
   "switches": {
     "provider": "mock",
     "verify_after_command": true,
     "startup_state": "off",
-    "hardware_max_on_minutes": null
+    "hardware_max_on_minutes": 30.0,
+    "shelly_devices": [],
+    "tapo_devices": [],
+    "tapo_username": "",
+    "tapo_password": "",
+    "timeout_s": 4.0
   },
   "system": {
     "host": "0.0.0.0",

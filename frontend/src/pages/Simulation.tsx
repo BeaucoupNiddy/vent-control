@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, Json } from "../api";
 import { Card, TimeChart } from "../components";
 import { hours, useUnit } from "../units";
+import { ZoneSimulation } from "./Zones";
 
 const COLORS = ["var(--series-1)", "var(--series-2)", "var(--series-3)", "var(--series-4)", "var(--series-5)", "var(--series-6)"];
 const color = (i: number) => COLORS[i % COLORS.length];
@@ -283,6 +284,7 @@ export default function Simulation() {
           </Card>
         </>
       )}
+      <ZoneSimulation />
     </>
   );
 }

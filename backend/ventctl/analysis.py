@@ -220,3 +220,167 @@ def shadow_agreement(rows: list[dict]) -> dict:
         by_policy[r.get("policy") or "unknown"] = by_policy.get(r.get("policy") or "unknown", 0) + h
     return {"hours_compared": both, "agreement_pct": agree / both * 100 if both else None,
             "runtime_in_control_h": on_ctrl, "runtime_shadow_h": on_shadow, "hours_by_policy": by_policy}
+
+
+# ---------------------------------------------------------------- Version 3: zones, surfaces, circulation
+def zone_stats(rows: list[dict], config: AppConfig) -> dict:
+    """Per-zone time above the circulation RH thresholds, mean/max RH and dew point, and per-probe
+    condensation exposure (hours with the conservative margin below each class threshold)."""
+    cs, ss = config.circulation, config.surfaces
+    hrs = _intervals(rows)
+    zs: dict[str, dict] = {}
+    sf: dict[str, dict] = {}
+    for r, h in zip(rows, hrs):
+        for zid, z in (r.get("zones") or {}).items():
+            if not isinstance(z, dict) or z.get("rh") is None or z.get("coloc"):
+                continue
+            rh = z["rh"] * 100 if z["rh"] <= 1.5 else z["rh"]
+            d = zs.setdefault(zid, {"hours": 0.0, "rh_sum": 0.0, "rh_max": 0.0, "td_sum": 0.0, "td_n": 0,
+                                    "above_elevated_h": 0.0, "above_high_h": 0.0, "above_critical_h": 0.0})
+            d["hours"] += h
+            d["rh_sum"] += rh * h
+            d["rh_max"] = max(d["rh_max"], rh)
+            if z.get("td_c") is not None:
+                d["td_sum"] += z["td_c"] * h
+                d["td_n"] += h
+            for k in ("elevated", "high", "critical"):
+                if rh >= getattr(cs, f"{k}_rh_pct"):
+                    d[f"above_{k}_h"] += h
+        for sid, s in (r.get("surfaces") or {}).items():
+            if not isinstance(s, dict) or s.get("cons_margin_f") is None:
+                continue
+            m = s["cons_margin_f"]
+            d = sf.setdefault(sid, {"hours": 0.0, "below_monitor_h": 0.0, "below_elevated_h": 0.0,
+                                    "possible_h": 0.0, "surface_rh_elevated_h": 0.0, "min_margin_f": None,
+                                    "zone": s.get("zone")})
+            d["hours"] += h
+            d["below_monitor_h"] += h if m < ss.monitor_margin_f else 0
+            d["below_elevated_h"] += h if m < ss.elevated_margin_f else 0
+            d["possible_h"] += h if m <= ss.possible_margin_f else 0
+            if s.get("srh") is not None and s["srh"] * 100 >= ss.surface_rh_elevated_pct:
+                d["surface_rh_elevated_h"] += h
+            mm = s.get("margin_f")
+            if mm is not None:
+                d["min_margin_f"] = mm if d["min_margin_f"] is None else min(d["min_margin_f"], mm)
+    zones_out = {}
+    for zid, d in zs.items():
+        t = d["hours"] or 1e-9
+        zones_out[zid] = {"name": config.zone_name(zid), "hours": d["hours"], "mean_rh": d["rh_sum"] / t,
+                          "max_rh": d["rh_max"], "mean_dew_point_c": d["td_sum"] / d["td_n"] if d["td_n"] else None,
+                          "above_elevated_h": d["above_elevated_h"], "above_high_h": d["above_high_h"],
+                          "above_critical_h": d["above_critical_h"]}
+    names = {m.sensor_id: m.name for m in config.sensors.mappings}
+    return {"zones": zones_out,
+            "surfaces": {sid: {**d, "name": names.get(sid, sid)} for sid, d in sf.items()},
+            "label": "Measured. Surface exposure uses the conservative margin (margin minus sensor uncertainty); it "
+                     "describes conditions where condensation is possible, not observed water."}
+
+
+MIN_EFFECT_SAMPLES = 30
+MIN_EFFECT_CYCLES = 3
+
+
+def _gradient_rates(rows: list[dict], za: str, zb: str):
+    """(fan rows state, exterior on, d|dW|/dt in g/kg per hour) for consecutive row pairs."""
+    out = []
+    for i in range(1, len(rows)):
+        a, b = rows[i - 1], rows[i]
+        dt = (datetime.fromisoformat(b["ts"]) - datetime.fromisoformat(a["ts"])).total_seconds() / 3600
+        if not (0 < dt <= 0.25):
+            continue
+        za0, zb0 = (a.get("zones") or {}).get(za), (a.get("zones") or {}).get(zb)
+        za1, zb1 = (b.get("zones") or {}).get(za), (b.get("zones") or {}).get(zb)
+        if not all(isinstance(x, dict) and x.get("w") is not None and not x.get("coloc") for x in (za0, zb0, za1, zb1)):
+            continue
+        g0 = abs(za0["w"] - zb0["w"]) * 1000
+        g1 = abs(za1["w"] - zb1["w"]) * 1000
+        out.append((a, g0, (g1 - g0) / dt))
+    return out
+
+
+def _mean_se(xs: list[float]) -> tuple[float, float]:
+    import math
+    n = len(xs)
+    m = sum(xs) / n
+    if n < 2:
+        return m, float("inf")
+    sd = math.sqrt(sum((x - m) ** 2 for x in xs) / (n - 1))
+    return m, sd / math.sqrt(n)
+
+
+def circulation_effectiveness(rows: list[dict], cycles: list[dict], config: AppConfig) -> dict:
+    """Informational: does each circulator measurably shrink the moisture gradient it serves?
+
+    Compares the rate of change of |dW| between the connected zones while the fan runs against
+    periods when it is off under the same exterior-ventilation state. Weather, the dehumidifier
+    and moisture sources also move humidity, so results stay "insufficient data" until there
+    are enough samples and cycles, and they never change fan behaviour automatically.
+    """
+    fans = []
+    for c in config.circulators:
+        conns = [k for k in config.connections if k.circulator_id == c.id]
+        own = [x for x in cycles if x.get("circulator_id") == c.id]
+        res_conns = []
+        for k in conns:
+            rates = _gradient_rates(rows, k.zone_a, k.zone_b)
+            groups: dict[tuple[bool, bool], list[float]] = {}
+            for r, g0, rate in rates:
+                on = bool(((r.get("circ") or {}).get(c.id) or {}).get("on"))
+                ext = (r.get("fans_on") or 0) > 0
+                if on and g0 < 0.05:
+                    continue  # nothing to mix
+                groups.setdefault((on, ext), []).append(rate)
+            comps = []
+            for ext in (False, True):
+                on_x, off_x = groups.get((True, ext), []), groups.get((False, ext), [])
+                if len(on_x) >= 2 and len(off_x) >= 2:
+                    mo, so = _mean_se(on_x)
+                    mf, sf_ = _mean_se(off_x)
+                    comps.append({"exterior_on": ext, "on_rate_g_kg_h": mo, "off_rate_g_kg_h": mf,
+                                  "effect_g_kg_h": mo - mf, "se_g_kg_h": (so ** 2 + sf_ ** 2) ** 0.5,
+                                  "on_samples": len(on_x), "off_samples": len(off_x)})
+            n_on = sum(x["on_samples"] for x in comps)
+            enough = n_on >= MIN_EFFECT_SAMPLES and len(own) >= MIN_EFFECT_CYCLES
+            verdict = "insufficient_data"
+            text = (f"Not enough data yet ({len(own)} recorded run(s), {n_on} fan-on samples with comparable fan-off "
+                    f"periods; need {MIN_EFFECT_CYCLES} runs and {MIN_EFFECT_SAMPLES} samples).")
+            if enough:
+                sig = [x for x in comps if x["on_samples"] >= 10 and abs(x["effect_g_kg_h"]) > 2 * x["se_g_kg_h"]]
+                helps = [x for x in sig if x["effect_g_kg_h"] < 0]
+                hurts = [x for x in sig if x["effect_g_kg_h"] > 0]
+                za, zb = config.zone_name(k.zone_a), config.zone_name(k.zone_b)
+                if helps and not hurts:
+                    only = {x["exterior_on"] for x in helps}
+                    verdict = "reduces_gradient"
+                    when = (" only while exterior ventilation runs" if only == {True} else
+                            " when exterior ventilation is off" if only == {False} else "")
+                    text = f"{c.name} reliably reduces the moisture difference between {za} and {zb}{when}."
+                elif hurts and not helps:
+                    verdict = "increases_gradient"
+                    text = (f"While {c.name} runs, the moisture difference between {za} and {zb} grows faster than "
+                            "when it is off. Check its placement and direction.")
+                else:
+                    verdict = "no_measurable_benefit"
+                    text = f"{c.name} has not shown a measurable benefit under current conditions."
+            res_conns.append({"connection": k.id, "zone_a": k.zone_a, "zone_b": k.zone_b, "verdict": verdict,
+                              "text": text, "comparisons": comps})
+        # surface margins over recorded runs
+        worse = []
+        for x in own:
+            ctx = x.get("context") or {}
+            s0, s1 = ctx.get("surface_margins_start_f") or {}, ctx.get("surface_margins_end_f") or {}
+            for sid, m0 in s0.items():
+                m1 = s1.get(sid)
+                if m0 is not None and m1 is not None and m1 < m0 - 0.5:
+                    worse.append({"ts": x.get("ts_start"), "sensor_id": sid, "start_f": m0, "end_f": m1})
+        surface_note = None
+        if worse:
+            surface_note = (f"During {len(worse)} of {len(own)} runs the condensation margin at a monitored surface "
+                            "fell by more than 0.5°F. Weather may explain some of this; watch for a pattern.")
+        fans.append({"id": c.id, "name": c.name, "runs": len(own), "connections": res_conns,
+                     "surface_margin_drops": worse[:20], "surface_note": surface_note,
+                     "runs_detail": own[:20]})
+    return {"fans": fans,
+            "label": "Informational only. Compares fan-on with fan-off periods under similar exterior ventilation; "
+                     "weather, the dehumidifier and moisture sources also change humidity. Fan behaviour is never "
+                     "changed automatically from these results."}

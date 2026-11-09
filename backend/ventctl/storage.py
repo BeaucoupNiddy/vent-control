@@ -87,6 +87,17 @@ MIGRATIONS: list[str] = [
         strategies TEXT, params TEXT, summary TEXT
     );
     """,
+    # 4: multi-zone monitoring, concrete probe, internal circulation fans
+    """
+    ALTER TABLE history ADD COLUMN circ TEXT;      -- JSON {circulator: {on, target, reason, commanding}}
+    ALTER TABLE history ADD COLUMN surfaces TEXT;  -- JSON {probe: {t_c, dew_c, margin_f, cons_margin_f, srh, risk}}
+    CREATE TABLE circulation_cycles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        circulator_id TEXT NOT NULL, ts_start TEXT NOT NULL, ts_end TEXT NOT NULL,
+        reason TEXT, start TEXT, "end" TEXT, context TEXT
+    );
+    CREATE INDEX idx_circ_cycles ON circulation_cycles(circulator_id, ts_start);
+    """,
 ]
 
 
@@ -99,16 +110,24 @@ class Storage:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # one connection shared by API threads and the control loop
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.migrate()
 
+    def _fetchall(self, sql: str, args=()) -> list:
+        with self._lock:
+            return self.db.execute(sql, args).fetchall()
+
+    def _fetchone(self, sql: str, args=()):
+        with self._lock:
+            return self.db.execute(sql, args).fetchone()
+
     def migrate(self) -> int:
         with self._lock:
             self.db.execute("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT)")
-            cur = self.db.execute("SELECT COALESCE(MAX(version), 0) FROM schema_migrations").fetchone()[0]
+            cur = self._fetchone("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")[0]
             for v, sql in enumerate(MIGRATIONS, start=1):
                 if v > cur:
                     self.db.executescript(sql)
@@ -119,7 +138,7 @@ class Storage:
 
     # ---------------------------------------------------------------- config
     def load_config(self) -> AppConfig | None:
-        row = self.db.execute("SELECT value FROM settings WHERE key='config'").fetchone()
+        row = self._fetchone("SELECT value FROM settings WHERE key='config'")
         return AppConfig.model_validate_json(row["value"]) if row else None
 
     def save_config(self, config: AppConfig) -> None:
@@ -132,7 +151,7 @@ class Storage:
 
     # ---------------------------------------------------------------- key/value (model parameters etc.)
     def get_kv(self, key: str):
-        row = self.db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        row = self._fetchone("SELECT value FROM settings WHERE key=?", (key,))
         return json.loads(row["value"]) if row else None
 
     def set_kv(self, key: str, value) -> None:
@@ -161,7 +180,7 @@ class Storage:
             self.db.commit()
 
     def thermal_predictions(self, limit: int = 50) -> list[dict]:
-        rows = self.db.execute("SELECT * FROM thermal_predictions ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = self._fetchall("SELECT * FROM thermal_predictions ORDER BY id DESC LIMIT ?", (limit,))
         return [dict(r) for r in rows]
 
     # ---------------------------------------------------------------- simulation runs
@@ -177,7 +196,7 @@ class Storage:
             self.db.commit()
 
     def simulation_runs(self, limit: int = 20) -> list[dict]:
-        rows = self.db.execute("SELECT * FROM simulation_runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = self._fetchall("SELECT * FROM simulation_runs ORDER BY id DESC LIMIT ?", (limit,))
         out = [dict(r) for r in rows]
         for r in out:
             for k in ("strategies", "params", "summary"):
@@ -203,22 +222,48 @@ class Storage:
             self.db.commit()
 
     def history(self, start: datetime, end: datetime, max_points: int = 2000) -> list[dict]:
-        rows = self.db.execute("SELECT * FROM history WHERE ts >= ? AND ts <= ? ORDER BY ts",
-                               (_iso(start), _iso(end))).fetchall()
+        rows = self._fetchall("SELECT * FROM history WHERE ts >= ? AND ts <= ? ORDER BY ts",
+                               (_iso(start), _iso(end)))
         out = [dict(r) for r in rows]
         for r in out:
             r["zones"] = json.loads(r["zones"]) if r["zones"] else {}
             r["groups"] = json.loads(r["groups"]) if r.get("groups") else {}
+            r["circ"] = json.loads(r["circ"]) if r.get("circ") else {}
+            r["surfaces"] = json.loads(r["surfaces"]) if r.get("surfaces") else {}
         if len(out) > max_points:
             stride = len(out) / max_points
             out = [out[int(i * stride)] for i in range(max_points)]
         return out
 
+    def add_circulation_cycle(self, row: dict) -> int:
+        with self._lock:
+            cur = self.db.execute(
+                'INSERT INTO circulation_cycles (circulator_id, ts_start, ts_end, reason, start, "end", context) '
+                'VALUES (?,?,?,?,?,?,?)',
+                (row["circulator_id"], _iso(row["ts_start"]), _iso(row["ts_end"]), row.get("reason"),
+                 json.dumps(row.get("start"), default=str), json.dumps(row.get("end"), default=str),
+                 json.dumps(row.get("context"), default=str)))
+            self.db.commit()
+            return cur.lastrowid
+
+    def circulation_cycles(self, circulator_id: str | None = None, limit: int = 500) -> list[dict]:
+        q, args = "SELECT * FROM circulation_cycles", []
+        if circulator_id:
+            q += " WHERE circulator_id = ?"
+            args.append(circulator_id)
+        q += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        out = [dict(r) for r in self._fetchall(q, args)]
+        for r in out:
+            for k in ("start", "end", "context"):
+                r[k] = json.loads(r[k]) if r[k] else None
+        return out
+
     def history_count(self) -> int:
-        return self.db.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        return self._fetchone("SELECT COUNT(*) FROM history")[0]
 
     def latest_history_ts(self) -> datetime | None:
-        r = self.db.execute("SELECT MAX(ts) FROM history").fetchone()[0]
+        r = self._fetchone("SELECT MAX(ts) FROM history")[0]
         return datetime.fromisoformat(r) if r else None
 
     # ---------------------------------------------------------------- events
@@ -241,7 +286,7 @@ class Storage:
             args.append(_iso(since))
         q += " ORDER BY id DESC LIMIT ?"
         args.append(limit)
-        out = [dict(r) for r in self.db.execute(q, args).fetchall()]
+        out = [dict(r) for r in self._fetchall(q, args)]
         for r in out:
             r["details"] = json.loads(r["details"]) if r["details"] else None
         return out
@@ -256,14 +301,14 @@ class Storage:
         return len(rows)
 
     def cached_weather(self, source: str, station: str, start: datetime, end: datetime) -> list[dict]:
-        rows = self.db.execute(
+        rows = self._fetchall(
             "SELECT ts, temp_c, dewpoint_c FROM weather_cache WHERE source=? AND station=? AND ts>=? AND ts<? ORDER BY ts",
-            (source, station, _iso(start), _iso(end))).fetchall()
+            (source, station, _iso(start), _iso(end)))
         return [dict(r) for r in rows]
 
     def weather_coverage(self) -> list[dict]:
-        rows = self.db.execute("SELECT source, station, MIN(ts) AS first, MAX(ts) AS last, COUNT(*) AS hours "
-                               "FROM weather_cache GROUP BY source, station").fetchall()
+        rows = self._fetchall("SELECT source, station, MIN(ts) AS first, MAX(ts) AS last, COUNT(*) AS hours "
+                               "FROM weather_cache GROUP BY source, station")
         return [dict(r) for r in rows]
 
     def prune(self, now: datetime, retention_days: int) -> None:

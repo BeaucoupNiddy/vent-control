@@ -34,7 +34,7 @@ def run_minutes(ctrl, clock, n):
 def force_on(ctrl, world, clock):
     """Put the world in strongly favorable drying conditions and run until fans are on."""
     world.model.w = world.model.w * 1.15  # very humid basement
-    world.model.surface_c = 30  # warm surface: condensation margin passes
+    world.set_surface_c(30)  # warm surface: condensation margin passes
     world.model.profile = world.profile.__class__("dry", "dry", "", [70.0] * 24, [50.0] * 24)
     run_minutes(ctrl, clock, 2)
 
@@ -123,7 +123,7 @@ def test_manual_override_expires_and_is_logged():
     ctrl, world, clock, store = make()
     asyncio.run(ctrl.startup())
     ctrl.set_mode(Mode.MANUAL_ON, minutes=5)
-    world.model.surface_c = 35  # keep condensation interlock clear
+    world.set_surface_c(35)  # keep condensation interlock clear
     run_minutes(ctrl, clock, 1)
     assert ctrl.decisions["main"].reason_code == "MANUAL_ON"
     run_minutes(ctrl, clock, 6)
@@ -154,5 +154,5 @@ def test_storage_migrations_idempotent(tmp_path):
     s = Storage(p)
     s.save_config(example_config())
     s2 = Storage(p)
-    assert s2.migrate() == 3
+    assert s2.migrate() == 4
     assert s2.load_config().fans[0].id == "v2d"

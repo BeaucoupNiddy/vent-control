@@ -230,3 +230,9 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 11px; background
 .ubar-fill.net.neg { background: var(--critical); }
 .ubar-val { text-align: right; font-variant-numeric: tabular-nums; }
 @media (max-width: 520px) { .ubar { grid-template-columns: 100px 1fr 64px; } }
+
+/* Version 3 */
+.badge.warn { background: var(--warn-bg); color: var(--text); border-color: var(--warning); }
+.zone-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; background: var(--surface); min-width: 0; }
+.zone-card .kv { margin-top: 6px; }
+ul.plain { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
