@@ -4,13 +4,14 @@ import { Icon } from "./components";
 import Dashboard from "./pages/Dashboard";
 import Diagnostics from "./pages/Diagnostics";
 import Events from "./pages/Events";
+import Home from "./pages/Home";
 import History from "./pages/History";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
 import Simulation from "./pages/Simulation";
 import { TempUnit, UnitContext } from "./units";
 
-const TABS = ["Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
+const TABS = ["Home", "Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
 type Tab = (typeof TABS)[number];
 
 function load<T>(k: string, d: T): T {
@@ -23,7 +24,7 @@ function save(k: string, v: unknown) {
 export default function App() {
   const [tab, setTab] = useState<Tab>(() => {
     const h = decodeURIComponent(location.hash.slice(1));
-    return (TABS as readonly string[]).includes(h) ? (h as Tab) : "Dashboard";
+    return (TABS as readonly string[]).includes(h) ? (h as Tab) : "Home";
   });
   const [unit, setUnit] = useState<TempUnit>(() => load("ventctl.unit", "F"));
   const [status, setStatus] = useState<Json>(null);
@@ -70,6 +71,7 @@ export default function App() {
       <main className="main">
         {offline && <div className="alert critical"><span className="icon"><Icon name="alert" /></span>
           <div><strong>Controller unreachable.</strong> The dashboard cannot reach the backend. Fans keep their last state; plug auto-off timers (if configured) still apply.</div></div>}
+        {tab === "Home" && <Home status={status} refresh={refresh} openTab={(t) => setTab(t as Tab)} />}
         {tab === "Dashboard" && <Dashboard status={status} refresh={refresh} />}
         {tab === "History" && <History />}
         {tab === "Simulation" && <Simulation />}
