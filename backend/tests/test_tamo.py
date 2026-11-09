@@ -139,9 +139,12 @@ def test_s8b_controller_raises_condensation_alert():
     world = MockWorld(cfg, T0)
     ctrl = Controller(cfg, Storage(":memory:"), MockSensors(world, clock), MockSwitches(world, clock), clock)
     asyncio.run(ctrl.startup())
-    world.model.surface_c = world.model.air().dew_point_c - 2
+    # the probe sits in the damp zone: put it below that zone's dew point
+    world.set_surface_c(world.mz.zone_air("damp").dew_point_c - 2)
     asyncio.run(ctrl.tick())
-    assert "CONDENSATION_SUSPECTED:main" in ctrl.alerts
+    assert "SURFACE_HIGH_RISK:mock-slab" in ctrl.alerts
+    # the old whole-basement estimate alert is replaced by the per-probe one
+    assert "CONDENSATION_SUSPECTED:main" not in ctrl.alerts
 
 
 def _forecast_case():
@@ -208,7 +211,7 @@ def test_s11b_predictions_are_recorded_and_checked_against_observations():
     ctrl, world, clock, store = _ctrl(cfg)
     asyncio.run(ctrl.startup())
     world.model.w *= 1.2
-    world.model.surface_c = 30
+    world.set_surface_c(30)
     world.model.profile = world.profile.__class__("dry", "dry", "", [62.0] * 24, [45.0] * 24)
 
     async def go(n):

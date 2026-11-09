@@ -56,6 +56,7 @@ class SensorMapping(BaseModel):
     temp_offset_f: float = Field(0.0, ge=-10, le=10, description="Calibration offset added to temperature")
     rh_offset_pct: float = Field(0.0, ge=-15, le=15, description="Calibration offset added to RH")
     enabled: bool = True
+    calibrated_at: str | None = Field(None, description="When offsets were last set from a side-by-side comparison")
 
 
 class Fan(BaseModel):
@@ -85,6 +86,115 @@ class ScheduleWindow(BaseModel):
         if self.start_hour <= self.end_hour:
             return self.start_hour <= hour < self.end_hour
         return hour >= self.start_hour or hour < self.end_hour  # wraps midnight
+
+
+class Zone(BaseModel):
+    """An environmental zone: a part of the basement that can differ from the rest."""
+
+    id: str
+    name: str
+    volume_ft3: float = Field(8000, gt=10, le=500000, description="Air volume of this zone (estimate)")
+    on_ventilation_path: bool = Field(False, description="Exterior fan air passes through this zone")
+    ventilation_exposure: float = Field(0.5, ge=0, le=1, description="Share of exterior-ventilation drying that "
+                                                                     "reaches this zone (assumption until observed)")
+    moisture_source_share: float = Field(0.33, ge=0, le=1, description="Share of the basement's moisture sources")
+    notes: str = ""
+
+
+class ZoneConnection(BaseModel):
+    """An intended air path between two zones. Describes intent, not proven airflow."""
+
+    id: str
+    zone_a: str
+    zone_b: str
+    circulator_id: str | None = Field(None, description="Internal fan that serves this connection")
+    direction: Literal["a_to_b", "b_to_a", "mixing"] = "a_to_b"
+    natural_cfm: float = Field(15, ge=0, le=5000, description="Assumed exchange with the fan off")
+    fan_exchange_cfm: float = Field(60, ge=0, le=5000, description="Assumed exchange with the fan on (a fan in a "
+                                                                   "doorway moves far less between rooms than its rating)")
+    unobstructed: bool = True
+    placement: Literal["doorway", "corridor", "in_zone"] = "doorway"
+
+
+class Circulator(BaseModel):
+    """An internal circulation fan on its own smart plug (ON/OFF only)."""
+
+    id: str
+    name: str
+    model: str = "Honeywell HT-900"
+    switch_id: str = ""
+    location: str = ""
+    physical_speed: Literal["low", "medium", "high", "unknown"] = Field("unknown", description="Set on the fan's "
+                                                                                           "own switch")
+    rated_w: float = Field(30, ge=0, le=500, description="Power draw at the selected speed (estimate unless metered)")
+    ventilation_support: bool = Field(False, description="May run to spread exterior-fan air into remote zones")
+    auto_enabled: bool = Field(True, description="Allow automatic control once commissioned")
+    commissioned: bool = Field(False, description="Fan checked: restarts after power loss, plug rated for the motor, "
+                                                  "speed switch set, kept clear of water")
+    enabled: bool = True
+
+
+class CirculationSettings(BaseModel):
+    """Internal air circulation. Automatic control starts in shadow mode."""
+
+    mode: Literal["off", "shadow", "auto"] = Field("shadow", description="shadow: decide and log, never switch")
+    min_on_minutes: float = Field(15, ge=0, le=240)
+    min_off_minutes: float = Field(10, ge=0, le=240)
+    observe_rh_pct: float = Field(55, ge=30, le=90)
+    elevated_rh_pct: float = Field(60, ge=30, le=95)
+    high_rh_pct: float = Field(65, ge=30, le=98)
+    critical_rh_pct: float = Field(70, ge=30, le=100)
+    elevated_persist_min: float = Field(30, ge=0, le=720)
+    high_persist_min: float = Field(15, ge=0, le=720)
+    critical_persist_min: float = Field(60, ge=0, le=1440)
+    rh_hysteresis_pct: float = Field(2, ge=0, le=10)
+    min_dw_start_g_kg: float = Field(0.6, ge=0, le=10, description="Humidity-ratio difference worth acting on")
+    min_dw_stop_g_kg: float = Field(0.3, ge=0, le=10)
+    min_rh_improvement_pct: float = Field(1.0, ge=0, le=20, description="Predicted RH drop in the target zone needed "
+                                                                         "to call mixing beneficial")
+    rh_uncertainty_pct: float = Field(3.0, ge=0, le=15, description="Air sensor RH accuracy before comparison")
+    rh_uncertainty_calibrated_pct: float = Field(1.5, ge=0, le=15, description="RH accuracy after side-by-side "
+                                                                              "comparison")
+    temp_uncertainty_f: float = Field(0.5, ge=0, le=5)
+    horizon_min: float = Field(30, ge=5, le=240)
+    ventilation_support: bool = True
+    post_ventilation_min: float = Field(15, ge=0, le=240, description="Keep supporting fans on after exterior "
+                                                                      "ventilation stops")
+    condensation_aware: bool = True
+    periodic_mixing: bool = False
+    mixing_on_min: float = Field(10, ge=1, le=240)
+    mixing_off_min: float = Field(30, ge=1, le=1440)
+    mixing_windows: list[ScheduleWindow] = Field(default_factory=list, description="Empty = any time")
+    mixing_fans: list[str] = Field(default_factory=list, description="Empty = all circulators")
+    energy_optimization: bool = Field(True, description="Skip circulation when every zone is below the observe "
+                                                        "threshold and no surface is at risk")
+    manual_override_minutes: float = Field(60, gt=0, le=24 * 60)
+
+    @model_validator(mode="after")
+    def _check(self) -> "CirculationSettings":
+        if not (self.observe_rh_pct <= self.elevated_rh_pct <= self.high_rh_pct <= self.critical_rh_pct):
+            raise ValueError("circulation RH thresholds must increase: observe <= elevated <= high <= critical")
+        if self.min_dw_stop_g_kg > self.min_dw_start_g_kg:
+            raise ValueError("circulation humidity-ratio stop threshold must not exceed the start threshold")
+        return self
+
+
+class SurfaceSettings(BaseModel):
+    """Measured-surface (concrete probe) condensation monitoring."""
+
+    monitor_margin_f: float = Field(5, ge=0, le=30, description="Below this margin: monitor (advisory)")
+    elevated_margin_f: float = Field(3, ge=0, le=30, description="Below this margin: elevated risk (warning)")
+    possible_margin_f: float = Field(0, ge=-10, le=10, description="At or below: condensation possible (high risk)")
+    probe_uncertainty_f: float = Field(1.0, ge=0, le=5, description="Probe accuracy (Ecowitt WN30: up to ±2°F; lower "
+                                                                    "after checking against a reference)")
+    dew_point_uncertainty_f: float = Field(1.0, ge=0, le=5, description="Local air dew-point accuracy")
+    hysteresis_f: float = Field(0.5, ge=0, le=5)
+    advisory_sustain_min: float = Field(30, ge=0, le=720)
+    surface_rh_elevated_pct: float = Field(80, ge=50, le=100, description="Estimated near-surface RH worth tracking")
+    persistent_hours: float = Field(6, gt=0, le=240, description="Near-saturation for this long = persistent risk")
+    air_follow_fraction: float | None = Field(None, ge=0, le=1, description="How much of an air-temperature change "
+                                                                            "the surface follows within the horizon; "
+                                                                            "blank = learned, else 0.5 (conservative)")
 
 
 class ControlSettings(BaseModel):
@@ -297,6 +407,11 @@ class AppConfig(BaseModel):
     fans: list[Fan] = Field(default_factory=list)
     groups: list[FanGroup] = Field(default_factory=lambda: [FanGroup(id="main", name="Basement")])
     dehumidifier: Dehumidifier = Field(default_factory=Dehumidifier)
+    zones: list[Zone] = Field(default_factory=list)
+    connections: list[ZoneConnection] = Field(default_factory=list)
+    circulators: list[Circulator] = Field(default_factory=list)
+    circulation: CirculationSettings = Field(default_factory=CirculationSettings)
+    surfaces: SurfaceSettings = Field(default_factory=SurfaceSettings)
     sensors: SensorSettings = Field(default_factory=SensorSettings)
     homeassistant: HomeAssistantSettings = Field(default_factory=HomeAssistantSettings)
     switches: SwitchSettings = Field(default_factory=SwitchSettings)
@@ -316,7 +431,31 @@ class AppConfig(BaseModel):
         for f in self.fans:
             if f.group not in gids:
                 raise ValueError(f"fan {f.id} references unknown group {f.group}")
+        zids = [z.id for z in self.zones]
+        if len(zids) != len(set(zids)):
+            raise ValueError("zone ids must be unique")
+        cids = [c.id for c in self.circulators]
+        if len(cids) != len(set(cids)):
+            raise ValueError("circulator ids must be unique")
+        fan_switches = {f.switch_id for f in self.fans if f.switch_id}
+        for c in self.circulators:
+            if c.switch_id and c.switch_id in fan_switches:
+                raise ValueError(f"circulator {c.id} shares smart plug {c.switch_id} with an exterior fan")
+        for k in self.connections:
+            if zids and (k.zone_a not in zids or k.zone_b not in zids):
+                raise ValueError(f"connection {k.id} references an unknown zone")
+            if k.zone_a == k.zone_b:
+                raise ValueError(f"connection {k.id} must join two different zones")
+            if k.circulator_id and k.circulator_id not in cids:
+                raise ValueError(f"connection {k.id} references unknown circulator {k.circulator_id}")
         return self
+
+    def zone(self, zid: str | None) -> "Zone | None":
+        return next((z for z in self.zones if z.id == zid), None)
+
+    def zone_name(self, zid: str | None) -> str:
+        z = self.zone(zid)
+        return z.name if z else (zid or "basement")
 
 
 def example_config() -> AppConfig:
@@ -329,12 +468,35 @@ def example_config() -> AppConfig:
                 actual_cfm=220, rated_w=40, switch_id="mock-plug-1"),
         ],
         control=ControlSettings(surface_temp_estimate_f=None),
+        zones=[
+            Zone(id="main", name="Main basement", volume_ft3=16000, on_ventilation_path=True, ventilation_exposure=1.0,
+                 moisture_source_share=0.5),
+            Zone(id="pocket", name="Remote pocket", volume_ft3=4500, ventilation_exposure=0.4,
+                 moisture_source_share=0.2),
+            Zone(id="damp", name="Moisture-prone area", volume_ft3=3500, ventilation_exposure=0.25,
+                 moisture_source_share=0.3),
+        ],
+        connections=[
+            ZoneConnection(id="main-pocket", zone_a="main", zone_b="pocket", circulator_id="circ-1",
+                           direction="a_to_b", placement="corridor"),
+            ZoneConnection(id="pocket-damp", zone_a="pocket", zone_b="damp", circulator_id="circ-2",
+                           direction="a_to_b", natural_cfm=10, placement="doorway"),
+        ],
+        circulators=[
+            Circulator(id="circ-1", name="Circulation fan 1", switch_id="mock-plug-2", location="Main passage",
+                       physical_speed="medium", ventilation_support=True),
+            Circulator(id="circ-2", name="Circulation fan 2", switch_id="mock-plug-3", location="Moisture-prone area",
+                       physical_speed="low"),
+        ],
         sensors=SensorSettings(
             mappings=[
                 SensorMapping(sensor_id="mock-out", name="Outdoor (north side)", role=SensorRole.OUTDOOR),
                 SensorMapping(sensor_id="mock-bsmt-1", name="Main basement", role=SensorRole.BASEMENT, zone="main"),
-                SensorMapping(sensor_id="mock-bsmt-2", name="Basement room 2", role=SensorRole.BASEMENT, zone="room2"),
-                SensorMapping(sensor_id="mock-slab", name="Concrete slab (NE corner)", role=SensorRole.SURFACE),
+                SensorMapping(sensor_id="mock-bsmt-2", name="Remote pocket", role=SensorRole.BASEMENT, zone="pocket"),
+                SensorMapping(sensor_id="mock-bsmt-3", name="Moisture-prone area", role=SensorRole.BASEMENT,
+                              zone="damp"),
+                SensorMapping(sensor_id="mock-slab", name="Foundation wall — northwest", role=SensorRole.SURFACE,
+                              zone="damp"),
                 SensorMapping(sensor_id="mock-up", name="Upstairs living room", role=SensorRole.UPSTAIRS),
             ]
         ),

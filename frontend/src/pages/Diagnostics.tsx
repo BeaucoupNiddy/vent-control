@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card } from "../components";
 import { num, pct, temp, useUnit } from "../units";
+import { SensorComparison } from "./Zones";
 
 export default function Diagnostics({ status }: { status: Json }) {
   const u = useUnit();
@@ -16,10 +17,12 @@ export default function Diagnostics({ status }: { status: Json }) {
 
   const fault = async (target: string, id: string | null, f: string | null) => setMock(await api.mockFault(target, id, f));
   const sensors = status?.sensors || [];
-  const switches = [...new Set((status?.groups || []).flatMap((g: Json) => g.fans.map((f: Json) => f.switch_id)))] as string[];
+  const switches = [...new Set([...(status?.groups || []).flatMap((g: Json) => g.fans.map((f: Json) => f.switch_id)),
+    ...(status?.circulation?.circulators || []).map((c: Json) => c.switch_id).filter(Boolean)])] as string[];
 
   return (
     <div className="grid g2">
+      <SensorComparison status={status} />
       {status?.data_source === "mock" && mock && (
         <Card title="Mock fault injection" right={<span className="badge mock">mock hardware</span>}>
           <p className="note">Exercise the fail-safe behavior. Effects show on the dashboard within a decision cycle; stale-sensor

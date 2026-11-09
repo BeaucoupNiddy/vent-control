@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card, Icon, Stat } from "../components";
 import TamoPanel, { ControllerLine, OpportunityBadge, ReasonList } from "./Tamo";
+import { CirculationPanel, SurfaceMonitor, ZonePanel } from "./Zones";
 import { deltaTemp, duration, hours, localTime, moisture, num, pct, temp, useUnit } from "../units";
 
 const MODES = [
@@ -95,6 +96,10 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
       </Card>
 
       <TamoPanel status={status} refresh={refresh} />
+
+      <ZonePanel status={status} />
+      <SurfaceMonitor status={status} />
+      <CirculationPanel status={status} refresh={refresh} />
 
       <div className="grid g3">
         <Card title="Basement" right={<span className="faint">{m.indoor_label}</span>}>

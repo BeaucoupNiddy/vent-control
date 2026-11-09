@@ -19,6 +19,15 @@ Temperature-aware optimization (TAMO):
     (more conservative limits) and trigger a refit
   * the thermal model is refit from recorded fan cycles every few hours when learning is on
   * an optional forecast is refreshed in the background; failures never affect control
+
+Version 3 (zones, concrete probe, internal circulation):
+  * every tick computes per-zone conditions (trends, persistence, sensor quality) and the
+    status of each measured surface against its own zone's dew point
+  * internal circulation fans have their own decision engine (circulation.py). They only
+    switch hardware in "auto" mode after the fan is marked commissioned; otherwise the
+    decision is recorded as a shadow ("would turn ON") and nothing is commanded
+  * manual circulator overrides are time-limited; a water-intrusion lockout turns them off
+  * completed circulator runs are recorded with before/after zone conditions for learning
 """
 
 from __future__ import annotations
@@ -31,7 +40,9 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .clock import Clock
-from . import calibration, tamo, thermal
+from . import calibration, circulation, tamo, thermal
+from . import surfaces as surf_mod
+from . import zones as zones_mod
 from .config import AppConfig, ControlPolicy, FanGroup, Mode, SensorRole
 from .engine import Decision, GroupState, decide, group_fans
 from .forecast import ForecastCache
@@ -116,6 +127,19 @@ class Controller:
     _indoor_hist: deque = field(default_factory=lambda: deque(maxlen=120))
     _no_safe_since: dict[str, datetime] = field(default_factory=dict)
     _agree: dict[str, bool] = field(default_factory=dict)
+    zone_tracker: zones_mod.ZoneTracker = field(default_factory=zones_mod.ZoneTracker)
+    surface_tracker: surf_mod.SurfaceTracker = field(default_factory=surf_mod.SurfaceTracker)
+    zone_status: dict = field(default_factory=dict)
+    surface_status: list = field(default_factory=list)
+    circ_states: dict = field(default_factory=dict)  # real plug state per circulator
+    circ_shadow: dict = field(default_factory=dict)  # hypothetical state while not commanding
+    circ_decisions: dict = field(default_factory=dict)
+    surface_learned: dict | None = None
+    comparison: dict | None = None
+    _cmp_samples: list = field(default_factory=list)
+    _circ_cycle: dict = field(default_factory=dict)
+    _circ_auto_on: set = field(default_factory=set)
+    _runtime_cache: tuple | None = None
     _started: bool = False
     _task: asyncio.Task | None = None
 
@@ -139,6 +163,16 @@ class Controller:
             self.groups[g.id] = gs
         if self.thermal_learned is None:
             self.thermal_learned = self.storage.get_kv("thermal_model")
+        if self.surface_learned is None:
+            self.surface_learned = self.storage.get_kv("surface_model")
+        if self.comparison is None:
+            self.comparison = self.storage.get_kv("sensor_comparison")
+            self._cmp_samples = list((self.storage.get_kv("sensor_comparison_samples") or [])[-3000:])
+        for c in self.config.circulators:
+            info = self.switch_info.get(c.switch_id)
+            self.circ_states[c.id] = circulation.CircState(
+                is_on=bool(info and info.confirmed), verified=bool(info and info.reachable),
+                last_change=now if turned_off else None)
         self.storage.add_event(now, "startup", "info",
                                "Controller started; reconciled switch states" +
                                (" and switched running fans OFF (safe startup state)" if turned_off else ""),
@@ -201,6 +235,7 @@ class Controller:
         fc = self.forecast.current(now) if self.forecast and cfg.temperature.forecast_enabled else None
         fc_age = self.forecast.age_h(now) if fc else None
         tp = self.thermal_params()
+        air_follow, _ = surf_mod.air_follow_fraction(cfg, self.surface_learned)
 
         local = now.astimezone(ZoneInfo(cfg.system.timezone))
         local_hour = local.hour + local.minute / 60
@@ -210,6 +245,7 @@ class Controller:
                 gs.is_on, gs.verified = self._group_switch_state(g.id)
             cond = conditions_for_group(snap, g, cfg)
             cond.forecast, cond.forecast_age_h = fc, fc_age
+            cond.surface_follow = air_follow
             was_on = gs.is_on
             d = decide(cond, gs, cfg, g, now, local_hour=local_hour, thermal_params=tp)
             _track_deferral(gs, d, now)
@@ -232,6 +268,8 @@ class Controller:
         allc = conditions_for_group(snap, FanGroup(id="_all", name="all"), cfg)
         if allc.indoor:
             self._indoor_hist.append((now, allc.indoor))
+        self._zones_and_surfaces(snap, allc, fc, now)
+        await self._circulate(now, local_hour)
         self._maybe_refit(now)
 
         await self._rearm_watchdogs(now)
@@ -240,6 +278,274 @@ class Controller:
         if self.last_history is None or (now - self.last_history) >= timedelta(minutes=cfg.system.history_minutes):
             self._write_history(now)
             self.last_history = now
+
+    # ------------------------------------------------------------ zones, surfaces, circulation
+    def _zones_and_surfaces(self, snap: Snapshot, allc, fc, now: datetime) -> None:
+        cfg = self.config
+        coloc = set(self.comparison["sensor_ids"]) if self.comparison else set()
+        zs = zones_mod.zone_statuses(snap, cfg, self.zone_tracker, now, coloc)
+        self.zone_status = zs
+        ss = surf_mod.surface_statuses(snap, cfg, zs, self.surface_tracker, now, fallback=allc.indoor,
+                                       outdoor=allc.outdoor, forecast=fc)
+        d0 = self.decisions.get(cfg.groups[0].id) if cfg.groups else None
+        per = (((d0.tamo or {}).get("condensation") or {}).get("surfaces", [])) if d0 else []
+        for st in ss:
+            m = next((x for x in per if x["name"] == st.name), None)
+            if m:
+                st.ventilation.update({"predicted_margin_on_f": m["margin_on_f"] - st.uncertainty_f,
+                                       "predicted_margin_off_f": m["margin_off_f"] - st.uncertainty_f,
+                                       "predicted_surface_on_f": m["surface_on_f"],
+                                       "horizon_min": cfg.temperature.horizon_min,
+                                       "note": "Conservative margins if the exterior fans run, from the shared "
+                                               "coupled model"})
+        self.surface_status = ss
+        if self.comparison:
+            row = {"ts": now.isoformat()}
+            for r in snap.readings:
+                if r.mapping.sensor_id in coloc and r.ok and r.temp_c is not None and r.rh is not None:
+                    row[r.mapping.sensor_id] = [r.temp_c, r.rh * 100]
+            if len(row) > 2:
+                self._cmp_samples = (self._cmp_samples + [row])[-3000:]
+
+    def _circ_switch_verified(self, sid: str, now: datetime) -> tuple[bool, bool]:
+        info = self.switch_info.get(sid)
+        if not sid or info is None:
+            return False, False
+        verified = info.reachable and info.confirmed is not None
+        fail = self._command_failures.get(sid)
+        if fail and now < fail[1]:
+            verified = False
+        if info.commanded is not None and info.confirmed is not None and info.commanded != info.confirmed:
+            verified = False
+        return bool(info.confirmed), verified
+
+    async def _circulate(self, now: datetime, local_hour: float) -> None:
+        cfg = self.config
+        cs = cfg.circulation
+        sim = cfg.mode == Mode.SIMULATION
+        ext_on = any(gs.is_on for gs in self.groups.values())
+        drying = any(d.target_on and d.effect is not None and d.effect.net_removal_g_h > 0
+                     for d in self.decisions.values())
+        exterior = {"on": ext_on, "drying": ext_on and drying}
+        for c in cfg.circulators:
+            st = self.circ_states.setdefault(c.id, circulation.CircState())
+            if st.manual is not None and st.manual_until is not None and now >= st.manual_until:
+                st.manual, st.manual_until = None, None
+                st.manual_ended = True
+                self.storage.add_event(now, "override", "info", f"{c.name}: manual override expired", "CIRC_MANUAL_EXPIRED",
+                                       {"circulator": c.id})
+            if not sim:
+                actual, verified = self._circ_switch_verified(c.switch_id, now)
+                if actual != st.is_on:
+                    st.last_change = now
+                    self._circ_transition(c, actual, now)
+                st.is_on, st.verified = actual, verified
+            else:
+                st.verified = True
+            commanding = cs.mode == "auto" and c.auto_enabled and c.commissioned
+            use = st
+            if not commanding and st.manual is None:
+                use = self.circ_shadow.setdefault(c.id, circulation.CircState(is_on=st.is_on, last_change=st.last_change))
+                use.verified = st.verified or sim or not c.switch_id
+            d = circulation.decide_circulator(c, cfg, self.zone_status, self.surface_status, use, now, exterior,
+                                              self.dehumidifier_running(), local_hour)
+            prev = self.circ_decisions.get(c.id)
+            self.circ_decisions[c.id] = d
+            if use is not st:  # shadow: track what would have happened
+                if d.target_on != use.is_on:
+                    use.is_on, use.last_change = d.target_on, now
+                use.last_reason = d.reason_code
+                # a fan the automation turned on earlier is switched off when automation stops commanding,
+                # and a manual ON that ended returns the fan to OFF (shadow mode never switches it on)
+                if (c.id in self._circ_auto_on or getattr(st, "manual_ended", False)) and st.is_on and not sim:
+                    await self._command_circ(c, st, False, "CIRCULATION_AUTOMATION_STOPPED" if c.id in
+                                             self._circ_auto_on else "CIRC_MANUAL_EXPIRED", now)
+                    self._circ_auto_on.discard(c.id)
+            else:
+                st.last_reason = d.reason_code
+                if sim:
+                    if d.target_on != st.is_on:
+                        st.is_on, st.last_change = d.target_on, now
+                elif d.target_on != st.is_on or (st.manual is None and d.target_on is False and st.is_on):
+                    if not (d.safety and d.reason_code == "PLUG_UNVERIFIED" and not st.is_on):
+                        await self._command_circ(c, st, d.target_on, d.reason_code, now)
+                        if d.target_on and st.manual is None:
+                            self._circ_auto_on.add(c.id)
+                        elif not d.target_on:
+                            self._circ_auto_on.discard(c.id)
+            if getattr(st, "manual_ended", False) and not st.is_on:
+                st.manual_ended = False
+            if prev is None or prev.reason_code != d.reason_code or prev.target_on != d.target_on:
+                shadow = use is not st
+                text = d.explanation
+                if shadow:
+                    text = f"{c.name} (shadow, not switched) {'would turn ON' if d.target_on else 'would stay OFF'}: " + \
+                        text.split(": ", 1)[-1]
+                else:
+                    text = f"{c.name} {text}"
+                self.storage.add_event(now, "circulation", "warning" if d.benefit == "adverse" else "info", text,
+                                       "CIRC:" + d.reason_code,
+                                       {"circulator": c.id, "target_on": d.target_on, "shadow": shadow,
+                                        "benefit": d.benefit, "reasons": d.reasons,
+                                        "predictions": d.predictions})
+
+    async def _command_circ(self, c, st, on: bool, reason: str, now: datetime) -> None:
+        if not c.switch_id:
+            return
+        failed = self._command_failures.get(c.switch_id)
+        if failed and failed[2] == on and now < failed[1]:
+            return  # locked out after a failed command: no rapid retries
+        res = await self.switches.set(c.switch_id, on)
+        self._record_status(res, now, commanded=on)
+        ok = res.reachable and res.on == on
+        details = {"switch": c.switch_id, "circulator": c.id, "command": "on" if on else "off",
+                   "confirmed_state": res.on, "reachable": res.reachable, "error": res.error, "reason_code": reason}
+        if ok:
+            self._command_failures.pop(c.switch_id, None)
+            self.storage.add_event(now, "command", "info", f"{c.name} switched {'ON' if on else 'OFF'}", reason, details)
+            if on != st.is_on:
+                st.last_change = now
+                self._circ_transition(c, on, now)
+            st.is_on = on
+        else:
+            msg = res.error or f"device reports {'ON' if res.on else 'OFF'} after command"
+            self.storage.add_event(now, "fault", "critical",
+                                   f"Command failure: {c.name} did not confirm {'ON' if on else 'OFF'} ({msg}). Its "
+                                   f"actual state is uncertain; retrying in {COMMAND_LOCKOUT_MIN} minutes.",
+                                   "COMMAND_FAILURE", details)
+            self._command_failures[c.switch_id] = (msg, now + timedelta(minutes=COMMAND_LOCKOUT_MIN), on)
+            st.verified = False
+
+    def _zone_snapshot(self) -> dict:
+        return {zid: {"t_c": z.air.t_c, "rh_pct": z.air.rh * 100, "dew_point_c": z.air.dew_point_c,
+                      "w_g_kg": z.air.w * 1000} for zid, z in self.zone_status.items() if z.air is not None}
+
+    def _circ_transition(self, c, on: bool, now: datetime) -> None:
+        """Record completed circulator runs with before/after conditions (for effectiveness learning)."""
+        if on:
+            self._circ_cycle[c.id] = {"ts": now, "start": self._zone_snapshot(),
+                                      "reason": (self.circ_decisions.get(c.id).reason_code
+                                                 if self.circ_decisions.get(c.id) else None),
+                                      "surfaces": {s.sensor_id: s.margin_f for s in self.surface_status}}
+            return
+        start = self._circ_cycle.pop(c.id, None)
+        if not start:
+            return
+        outd = next((d.metrics.get("outdoor") for d in self.decisions.values() if d.metrics.get("outdoor")), None)
+        self.storage.add_circulation_cycle({
+            "circulator_id": c.id, "ts_start": start["ts"], "ts_end": now, "reason": start["reason"],
+            "start": start["start"], "end": self._zone_snapshot(),
+            "context": {"exterior_on": any(gs.is_on for gs in self.groups.values()),
+                        "dehumidifier_running": self.dehumidifier_running(), "outdoor": outd,
+                        "surface_margins_start_f": start["surfaces"],
+                        "surface_margins_end_f": {s.sensor_id: s.margin_f for s in self.surface_status},
+                        "other_circulators_on": [k for k, v in self.circ_states.items() if v.is_on and k != c.id],
+                        "connections": [k.model_dump() for k in self.config.connections if k.circulator_id == c.id]},
+        })
+
+    def set_circulator_manual(self, cid: str, state: str, minutes: float | None = None, who: str = "user") -> None:
+        c = next((x for x in self.config.circulators if x.id == cid), None)
+        if c is None:
+            raise KeyError(cid)
+        st = self.circ_states.setdefault(cid, circulation.CircState())
+        now = self.clock.now()
+        if state == "auto":
+            if st.manual is not None:
+                st.manual_ended = True
+            st.manual, st.manual_until = None, None
+            msg = f"{c.name}: returned to automatic control"
+        else:
+            dur = minutes or self.config.circulation.manual_override_minutes
+            st.manual, st.manual_until = state == "on", now + timedelta(minutes=dur)
+            msg = f"{c.name}: manual {state.upper()} for {dur:.0f} min"
+        self.storage.add_event(now, "override", "info", msg, "CIRC_MANUAL", {"by": who, "circulator": cid,
+                                                                          "state": state, "minutes": minutes})
+
+    def set_circulation_mode(self, mode: str, who: str = "user") -> None:
+        old = self.config.circulation.mode
+        if old == mode:
+            return
+        self.config.circulation.mode = mode  # type: ignore[assignment]
+        self.circ_shadow.clear()
+        self.storage.save_config(self.config)
+        self.storage.add_event(self.clock.now(), "config", "warning", f"Circulation automation changed from {old} to "
+                               f"{mode}", "CIRCULATION_MODE", {"by": who, "from": old, "to": mode})
+
+    # sensor side-by-side comparison (commissioning)
+    def comparison_start(self, sensor_ids: list[str]) -> dict:
+        now = self.clock.now()
+        self.comparison = {"sensor_ids": sensor_ids, "started_at": now.isoformat()}
+        self._cmp_samples = []
+        self.storage.set_kv("sensor_comparison", self.comparison)
+        self.storage.add_event(now, "config", "info", f"Sensor comparison started: {', '.join(sensor_ids)}. Their zone "
+                               "readings are not used for control until it is stopped.", "SENSOR_COMPARISON_START")
+        return self.comparison_status()
+
+    def comparison_status(self) -> dict:
+        if not self.comparison:
+            return {"active": False}
+        ids = self.comparison["sensor_ids"]
+        samples = {sid: [tuple(r[sid]) for r in self._cmp_samples if all(i in r for i in ids)] for sid in ids}
+        res = zones_mod.compare_sensors(samples, rh_threshold_pct=2 * self.config.circulation.rh_uncertainty_calibrated_pct)
+        started = datetime.fromisoformat(self.comparison["started_at"])
+        return {"active": True, **self.comparison, "hours": (self.clock.now() - started).total_seconds() / 3600,
+                "result": res, "recommended_hours": [24, 48]}
+
+    def comparison_stop(self, apply: bool = False) -> dict:
+        res = self.comparison_status()
+        now = self.clock.now()
+        applied = []
+        prev_offsets: list[dict] = []
+        if apply and res.get("result", {}).get("ok"):
+            for m in self.config.sensors.mappings:
+                r = res["result"]["sensors"].get(m.sensor_id)
+                if r and r.get("stable"):
+                    prev_offsets.append({"sensor_id": m.sensor_id, "temp_offset_f": m.temp_offset_f,
+                                         "rh_offset_pct": m.rh_offset_pct, "calibrated_at": m.calibrated_at})
+                    m.temp_offset_f = round(max(-10, min(10, m.temp_offset_f + r["suggested_temp_offset_f"])), 1)
+                    m.rh_offset_pct = round(max(-15, min(15, m.rh_offset_pct + r["suggested_rh_offset_pct"])), 1)
+                    m.calibrated_at = now.isoformat()
+                    applied.append(m.sensor_id)
+            self.storage.save_config(self.config)
+        self.storage.add_event(now, "config", "info",
+                               "Sensor comparison stopped" + (f"; offsets applied to {', '.join(applied)}" if applied else ""),
+                               "SENSOR_COMPARISON_STOP", {"result": res.get("result"), "applied": applied,
+                                                          "previous_offsets": prev_offsets})
+        if self._cmp_samples:
+            self.storage.set_kv("sensor_comparison_last", {"result": res.get("result"), "ended_at": now.isoformat(),
+                                                           "applied": applied})
+        self.comparison = None
+        self._cmp_samples = []
+        for z in self.zone_status.values():
+            z.colocated = False  # refreshed on the next reading
+        self.storage.set_kv("sensor_comparison", None)
+        self.storage.set_kv("sensor_comparison_samples", [])
+        return {**res, "applied": applied}
+
+    def circulator_runtime(self) -> dict:
+        """Runtime today and this month per circulator from recorded history (cached for 5 minutes)."""
+        now = self.clock.now()
+        if self._runtime_cache and now - self._runtime_cache[0] < timedelta(minutes=5):
+            return self._runtime_cache[1]
+        tz = ZoneInfo(self.config.system.timezone)
+        local = now.astimezone(tz)
+        day0 = local.replace(hour=0, minute=0, second=0, microsecond=0)
+        month0 = day0.replace(day=1)
+        rows = self.storage.history(month0, now, max_points=10 ** 7)
+        out = {c.id: {"today_h": 0.0, "month_h": 0.0, "month_kwh": 0.0} for c in self.config.circulators}
+        for i in range(1, len(rows)):
+            a, b = rows[i - 1], rows[i]
+            ta, tb = datetime.fromisoformat(a["ts"]), datetime.fromisoformat(b["ts"])
+            hrs = min((tb - ta).total_seconds() / 3600, 0.25)
+            for cid, v in (a.get("circ") or {}).items():
+                if cid in out and v.get("on"):
+                    out[cid]["month_h"] += hrs
+                    if ta >= day0:
+                        out[cid]["today_h"] += hrs
+                    c = next(x for x in self.config.circulators if x.id == cid)
+                    out[cid]["month_kwh"] += (v.get("power_w") if v.get("power_w") else c.rated_w) * hrs / 1000
+        self._runtime_cache = (now, out)
+        return out
 
     # ------------------------------------------------------------ TAMO support
     def thermal_params(self) -> thermal.ThermalParams:
@@ -368,6 +674,10 @@ class Controller:
         learned["history"] = hist
         self.thermal_learned = learned
         self.storage.set_kv("thermal_model", learned)
+        sfit = surf_mod.fit_air_follow(rows)
+        sfit["fitted_at"] = now.isoformat()
+        self.surface_learned = sfit
+        self.storage.set_kv("surface_model", sfit)
         return fit
 
     def refit_thermal(self) -> dict:
@@ -455,7 +765,8 @@ class Controller:
 
     # ------------------------------------------------------------ helpers
     def _switch_ids(self) -> list[str]:
-        return sorted({f.switch_id for f in self.config.fans if f.switch_id})
+        return sorted({f.switch_id for f in self.config.fans if f.switch_id} |
+                      {c.switch_id for c in self.config.circulators if c.switch_id and c.enabled})
 
     def _record_status(self, st: SwitchStatus, now: datetime, commanded: bool | None = None) -> None:
         info = self.switch_info.setdefault(st.switch_id, SwitchInfo(st.switch_id))
@@ -570,7 +881,7 @@ class Controller:
             self._set_alert(now, f"UNCOMMANDED_RUN:{sid}", bool(uncommanded), "critical",
                             f"Fan on {sid} is running without a controller command")
             fans = [f for f in cfg.fans if f.switch_id == sid]
-            rated = sum(f.rated_w for f in fans)
+            rated = sum(f.rated_w for f in fans) + sum(c.rated_w for c in cfg.circulators if c.switch_id == sid)
             odd = (info.reachable and info.confirmed and info.power_w is not None and rated > 0
                    and not (0.3 * rated <= info.power_w <= 1.6 * rated))
             self._set_alert(now, f"UNEXPECTED_POWER:{sid}", bool(odd), "warning",
@@ -595,7 +906,8 @@ class Controller:
                     self._rh_above.pop(key, None)
                     self._set_alert(now, key, False)
             surf_c = d.metrics.get("surface_c")
-            if ind and surf_c is not None and d.metrics.get("surface_source") == "measured":
+            zoned_probes = any(s.local_source == "zone" for s in self.surface_status)
+            if ind and surf_c is not None and d.metrics.get("surface_source") == "measured" and not zoned_probes:
                 # hysteresis: raise within 1°F of the dew point, clear only once 2°F clear
                 active = f"CONDENSATION_SUSPECTED:{gid}" in self.alerts
                 band = delta_f_to_c(2.0 if active else 1.0)
@@ -619,8 +931,9 @@ class Controller:
                 hrs = (now - since).total_seconds() / 3600
                 self._set_alert(now, key, hrs >= 3, "critical",
                                 f"Basement RH is {rh:.0f}% and outdoor air has not offered safe, worthwhile drying for "
-                                f"{hrs:.0f} hours (latest reason: {prim}). Ventilation cannot fix this on its own: run "
-                                "a dehumidifier and look for the moisture source.")
+                                f"{hrs:.0f} hours (latest reason: {prim}). Ventilation cannot fix this on its own, and "
+                                "internal circulation fans only move moisture between zones: run a dehumidifier and "
+                                "look for the moisture source.")
             else:
                 self._no_safe_since.pop(gid, None)
                 self._set_alert(now, key, False)
@@ -633,6 +946,19 @@ class Controller:
         for f in cfg.fans:
             self._set_alert(now, f"MOTOR_LOAD:{f.id}", f.enabled and not f.motor_load_ok, "warning",
                             f"{f.name}: smart switch is not confirmed as rated for this motor load.")
+        self._surface_alerts(now)
+        cs = cfg.circulation
+        for zid, z in self.zone_status.items():
+            crit = (z.minutes_above or {}).get("critical") or 0
+            self._set_alert(now, f"ZONE_RH_CRITICAL:{zid}", crit >= cs.critical_persist_min, "warning",
+                            f"{z.name}: RH has been above {cs.critical_rh_pct:.0f}% for {crit / 60:.1f} h. Circulation "
+                            "can only redistribute moisture; check whether exterior ventilation or a dehumidifier can "
+                            "remove it.")
+        for c in cfg.circulators:
+            self._set_alert(now, f"CIRCULATOR_NOT_COMMISSIONED:{c.id}",
+                            cs.mode == "auto" and c.enabled and c.auto_enabled and not c.commissioned, "info",
+                            f"{c.name}: automatic control waits until the fan is commissioned (restarts after power "
+                            "loss, plug rated for the motor, kept above flood level). Decisions are shadow-only.")
         dh = cfg.dehumidifier
         if dh.enabled and dh.monitor_switch_id:
             st = self.dehum_status
@@ -650,6 +976,37 @@ class Controller:
         self._set_alert(now, "NO_HARDWARE_WATCHDOG", self.data_source != "mock" and not watchdog, "info",
                         "No hardware auto-off timer is configured on the smart plugs. If this computer stops, "
                         "fans that are ON will stay ON.")
+
+    def _surface_alerts(self, now: datetime) -> None:
+        ss = self.config.surfaces
+        note = " This is a thermodynamic possibility, not a detection of liquid water."
+        for s in self.surface_status:
+            sid = s.sensor_id
+            self._set_alert(now, f"SURFACE_PROBE_UNAVAILABLE:{sid}", s.t_c is None, "warning",
+                            s.message or f"{s.name}: surface probe unavailable")
+            have = s.conservative_margin_f is not None
+            mins = s.minutes or {}
+            adv = have and s.risk == "monitor" and (mins.get("below_monitor") or 0) >= ss.advisory_sustain_min
+            m = f"{s.margin_f:.1f}°F (±{s.uncertainty_f:.1f}°F)" if have else ""
+            cause = f" {s.cause}" if s.cause else ""
+            self._set_alert(now, f"SURFACE_ADVISORY:{sid}", bool(adv), "info",
+                            f"{s.name}: condensation margin {m} has been under {ss.monitor_margin_f:.0f}°F for a while."
+                            f"{cause}")
+            self._set_alert(now, f"SURFACE_WARNING:{sid}", have and s.risk == "elevated", "warning",
+                            f"{s.name}: condensation margin {m} is under {ss.elevated_margin_f:.0f}°F.{cause}{note}")
+            self._set_alert(now, f"SURFACE_HIGH_RISK:{sid}", have and s.risk == "possible", "critical",
+                            f"{s.name}: surface temperature is at or below the local dew point allowing for sensor "
+                            f"uncertainty (margin {m}). Condensation is possible.{cause}{note}")
+            persist = have and (mins.get("near_saturation") or 0) >= ss.persistent_hours * 60
+            self._set_alert(now, f"SURFACE_PERSISTENT:{sid}", bool(persist), "critical",
+                            f"{s.name}: near-saturation conditions for over {ss.persistent_hours:.0f} h. Sustained damp "
+                            "surfaces can grow mold before any water is visible.")
+            v = s.ventilation or {}
+            self._set_alert(now, f"OUTDOOR_AIR_SURFACE_RISK:{sid}",
+                            have and bool(v.get("outdoor_air_would_condense")) and s.risk in ("lower", "monitor"),
+                            "info", f"{s.name}: outdoor air (dew point {v.get('outdoor_dew_point_c', 0) * 1.8 + 32:.0f}°F) "
+                            "would condense on this surface if brought in, so exterior ventilation is held off. "
+                            "Condensation is not occurring now: the basement air is drier.")
 
     # ------------------------------------------------------------ history
     def _write_history(self, now: datetime) -> None:
@@ -698,6 +1055,25 @@ class Controller:
         for r in self.snapshot.readings:
             if r.mapping.role == SensorRole.BASEMENT and r.ok:
                 zones[r.mapping.zone or r.mapping.sensor_id] = {"t_c": r.temp_c, "rh": r.rh}
+        for zid, z in self.zone_status.items():
+            if z.air is not None:
+                zones[zid] = {"t_c": z.air.t_c, "rh": z.air.rh, "td_c": z.air.dew_point_c, "w": z.air.w,
+                              "coloc": z.colocated or None}
+        circ = {}
+        for c in cfg.circulators:
+            st = self.circ_states.get(c.id)
+            dd = self.circ_decisions.get(c.id)
+            info = self.switch_info.get(c.switch_id)
+            circ[c.id] = {"on": int(bool(st and st.is_on)), "target": int(bool(dd and dd.target_on)),
+                          "reason": dd.reason_code if dd else None, "commanding": bool(dd and dd.commanding),
+                          "power_w": info.power_w if info and info.reachable and st and st.is_on else None}
+        surfaces = {}
+        for sst in self.surface_status:
+            if sst.t_c is None:
+                continue
+            surfaces[sst.sensor_id] = {"t_c": sst.t_c, "dew_c": sst.local.dew_point_c if sst.local else None,
+                                       "margin_f": sst.margin_f, "cons_margin_f": sst.conservative_margin_f,
+                                       "srh": sst.surface_rh, "risk": sst.risk, "zone": sst.zone}
         dh = self.dehum_status
         self.storage.add_history(now, {
             "source": self.data_source,
@@ -725,9 +1101,13 @@ class Controller:
                           if cfg.groups[0].id in self.shadow_decisions else None),
             "opportunity": first.opportunity if first else None,
             "pipe_t_c": allc.pipe_c,
+            "circ": circ, "surfaces": surfaces,
         })
 
     # ------------------------------------------------------------ status
+    def _circ_status(self, now: datetime) -> list[dict]:
+        return _circ_status_impl(self, now)
+
     def status(self) -> dict:
         now = self.clock.now()
         groups = []
@@ -773,6 +1153,15 @@ class Controller:
                 "gateway_error": self._gateway_error,
                 "switches": {s: i.to_dict() for s, i in self.switch_info.items()},
             },
+            "zones": {k: z.to_dict() for k, z in self.zone_status.items()},
+            "zone_summary": zones_mod.summary(self.zone_status, self.config) if self.zone_status else None,
+            "surfaces": [x.to_dict() for x in self.surface_status],
+            "surface_model": {"air_follow_fraction": surf_mod.air_follow_fraction(self.config, self.surface_learned)[0],
+                              "source": surf_mod.air_follow_fraction(self.config, self.surface_learned)[1],
+                              "learned": self.surface_learned},
+            "circulation": {"mode": self.config.circulation.mode, "circulators": self._circ_status(now),
+                            "elevated_rh_pct": self.config.circulation.elevated_rh_pct},
+            "comparison": self.comparison_status() if self.comparison else {"active": False},
             "dehumidifier": None if not self.config.dehumidifier.enabled else {
                 "name": self.config.dehumidifier.name,
                 "power_w": self.dehum_status.power_w if self.dehum_status else None,
@@ -781,6 +1170,24 @@ class Controller:
                 "monitored": bool(self.config.dehumidifier.monitor_switch_id),
             },
         }
+
+
+def _circ_status_impl(ctrl: "Controller", now: datetime) -> list[dict]:
+    rt = ctrl.circulator_runtime()
+    out = []
+    for c in ctrl.config.circulators:
+        st = ctrl.circ_states.get(c.id, circulation.CircState())
+        info = ctrl.switch_info.get(c.switch_id, SwitchInfo(c.switch_id))
+        d = ctrl.circ_decisions.get(c.id)
+        conns = [k.model_dump() for k in ctrl.config.connections if k.circulator_id == c.id]
+        state = ("on" if st.is_on else "off") if st.verified else "unknown"
+        out.append({**c.model_dump(), "switch": info.to_dict(), "is_on": st.is_on if st.verified else None,
+                    "state": state, "verified": st.verified,
+                    "manual": st.manual, "manual_until": st.manual_until.isoformat() if st.manual_until else None,
+                    "decision": d.to_dict() if d else None, "connections": conns,
+                    "runtime": rt.get(c.id), "running_s": (now - info.on_since).total_seconds() if info.on_since else None,
+                    "energy_label": "measured" if info.power_w else "estimated from rated watts"})
+    return out
 
 
 def _policy_name(p: ControlPolicy) -> str:

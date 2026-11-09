@@ -164,7 +164,8 @@ class TamoResult:
 
 
 def evaluate(indoor: AirState, outdoor: AirState, effect: VentilationEffect, look: Outlook, config: AppConfig,
-             is_on: bool, surface_c: float | None, energy_value_g_kwh: float, want_on: bool = True) -> TamoResult:
+             is_on: bool, surface_c: float | None, energy_value_g_kwh: float, want_on: bool = True,
+             surfaces: list[dict] | None = None, air_follow: float = 0.5) -> TamoResult:
     t = config.temperature
     h = t.horizon_min
     hrs = h / 60
@@ -203,20 +204,45 @@ def evaluate(indoor: AirState, outdoor: AirState, effect: VentilationEffect, loo
 
     energy = effect.total_power_w / 1000 * energy_value_g_kwh
 
-    # condensation risk from predicted surface temperature and predicted indoor dew point
+    # condensation risk from predicted surface temperature and predicted LOCAL dew point.
+    # Surface response: it follows a fraction f of the air-temperature change within the horizon
+    # (learned from fan cycles; 0.5 assumed, which is conservative for cold air) plus the slow structure change.
     risk = 0.0
     cond: dict = {}
-    if surface_c is not None:
-        s_on = surface_c + (look.on.tm_c[i_on] - look.tm0)  # surfaces follow the structure (estimate)
-        s_off = surface_c + (look.off.tm_c[i_off] - look.tm0)
-        m_now = delta_c_to_f(surface_c - indoor.dew_point_c)
-        m_on, m_off = delta_c_to_f(s_on - td_on), delta_c_to_f(s_off - td_off)
+    f = air_follow
+    dt_on, dt_off = t_on - indoor.t_c, t_off - indoor.t_c
+    dtm_on, dtm_off = look.on.tm_c[i_on] - look.tm0, look.off.tm_c[i_off] - look.tm0
+    dw_on, dw_off = w_on - indoor.w, w_off - indoor.w
+    probes = [s for s in (surfaces or []) if s.get("t_c") is not None]
+    if not probes and surface_c is not None:
+        probes = [{"name": "surface", "t_c": surface_c, "local": None, "exposure": 1.0}]
+    per = []
+    for sp in probes:
+        loc = sp.get("local") or indoor
+        exp = float(sp.get("exposure", 1.0))
 
+        def local_dew(dt: float, dw: float) -> float:
+            # moisture added reaches the surface fully; drying reaches a pocket only partly (exposure)
+            w = loc.w + (dw if dw > 0 else dw * exp)
+            tt = loc.t_c + dt
+            return AirState.from_t_w(tt, max(1e-6, min(w, psychro.humidity_ratio(tt, 1.0, loc.p_kpa))),
+                                     loc.p_kpa).dew_point_c
+        s_on = sp["t_c"] + f * dt_on + (1 - f) * dtm_on
+        s_off = sp["t_c"] + f * dt_off + (1 - f) * dtm_off
+        m_now = delta_c_to_f(sp["t_c"] - loc.dew_point_c)
+        m_on = delta_c_to_f(s_on - local_dew(dt_on, dw_on))
+        m_off = delta_c_to_f(s_off - local_dew(dt_off, dw_off))
+        per.append({"name": sp["name"], "zone": sp.get("zone"), "margin_f": m_now, "margin_on_f": m_on,
+                    "margin_off_f": m_off, "surface_on_f": c_to_f(s_on), "surface_off_f": c_to_f(s_off)})
+    if per:
         def r(m: float) -> float:
             return max(0.0, t.condensation_caution_f - m) ** 2
-        risk = t.risk_weight_g_h * max(0.0, r(m_on) - r(m_off))
-        cond = {"indoor_margin_f": m_now, "indoor_margin_on_f": m_on, "indoor_margin_off_f": m_off,
-                "band": margin_band(m_now, t), "band_on": margin_band(m_on, t)}
+        risk = t.risk_weight_g_h * max(max(0.0, r(x["margin_on_f"]) - r(x["margin_off_f"])) for x in per)
+        w0 = min(per, key=lambda x: x["margin_on_f"])
+        cond = {"indoor_margin_f": w0["margin_f"], "indoor_margin_on_f": w0["margin_on_f"],
+                "indoor_margin_off_f": w0["margin_off_f"], "band": margin_band(min(x["margin_f"] for x in per), t),
+                "band_on": margin_band(w0["margin_on_f"], t), "worst_surface": w0["name"], "surfaces": per,
+                "air_follow_fraction": f}
 
     switching = t.switch_cost_g_h if want_on != is_on else 0.0
     utility = benefit - thermal_pen - energy - risk - switching

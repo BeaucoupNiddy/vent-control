@@ -40,3 +40,33 @@ def test_mode_and_fault_endpoints(tmp_path):
         st = c.post("/api/mock/fault", json={"target": "switch", "id": "mock-plug-1", "fault": "unreachable"}).json()
         assert st["switch_faults"]["mock-plug-1"] == "unreachable"
         assert c.post("/api/mode", json={"mode": "auto"}).json()["mode"] == "auto"
+
+
+def test_v3_zone_surface_circulation_endpoints(tmp_path):
+    with client(tmp_path, 3) as c:
+        z = c.get("/api/zones").json()
+        assert set(z["zones"]) == {"main", "pocket", "damp"}
+        assert z["summary"]["wettest_w"] and z["connections"]
+        assert all("dw_g_kg" in g for g in z["connections"])
+        sf = c.get("/api/surfaces").json()["surfaces"]
+        assert sf and sf[0]["zone"] == "damp" and sf[0]["risk"]
+        circ = c.get("/api/circulation").json()
+        assert circ["mode"] == "shadow" and len(circ["circulators"]) == 2
+        # automation cannot be enabled before commissioning
+        assert c.post("/api/circulation/mode", json={"mode": "auto"}).status_code == 400
+        r = c.post("/api/circulators/circ-1/manual", json={"state": "on", "minutes": 15}).json()
+        assert next(x for x in r["circulators"] if x["id"] == "circ-1")["manual"] is True
+        assert c.post("/api/circulators/nope/manual", json={"state": "on"}).status_code == 404
+        assert c.post("/api/circulators/circ-1/manual", json={"state": "maybe"}).status_code == 400
+        st = c.get("/api/zones/stats?range=24h").json()
+        assert "pocket" in st["zones"] and st["surfaces"]
+        eff = c.get("/api/circulation/effectiveness").json()
+        assert len(eff["fans"]) == 2 and "Informational" in eff["label"]
+        assert c.get("/api/circulation/cycles").status_code == 200
+        cmp_ = c.post("/api/sensors/compare", json={"action": "start"}).json()
+        assert cmp_["active"] and len(cmp_["sensor_ids"]) == 3
+        assert c.get("/api/sensors/compare").json()["active"]
+        assert c.post("/api/sensors/compare", json={"action": "stop"}).json()["applied"] == []
+        sim = c.post("/api/sim/zones", json={"params": {"duration_h": 12}, "strategies": ["none", "both"]}).json()
+        assert [r["id"] for r in sim["results"]] == ["none", "both"]
+        assert len(c.get("/api/sim/zones/strategies").json()) == 8

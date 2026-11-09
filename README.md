@@ -197,6 +197,85 @@ Cooling raises RH without adding water. The Dashboard splits each recent RH chan
 - The utility weights are judgement, not physics. Shadow mode exists so you can compare both controllers on your basement before switching.
 - The V2 specification text received was cut off in section 29.B ("Relative humidity can increase during effective drying …"). Anything after that point wasn't implemented.
 
+## Version 3: zones, concrete probe and circulation fans
+
+Version 3 treats the basement as connected zones instead of one well-mixed room. It keeps three jobs separate: exterior ventilation brings drier air in, circulation fans move air between zones, and the concrete probe watches one cold surface for condensation. Exterior ventilation still runs on the V1/V2 engine. V3 changes it only where the probe now feeds the TAMO surface prediction.
+
+### Zones
+
+- A zone is a named part of the basement (Settings, Zones). The defaults are *Main basement* (on the exterior-fan air path), *Remote pocket* and *Moisture-prone area*. Assign each air sensor and the concrete probe to a zone in Settings, Sensors.
+- Each zone card shows temperature, RH, dew point, humidity ratio W (with uncertainty), absolute humidity, RH and dew-point trends, time above the circulation thresholds, and sensor quality.
+- Zones are compared by **moisture content**, not RH. A difference in W counts as real only when it is larger than the combined uncertainty of the two sensors, which comes from ±3 % RH and ±0.5 °F before a side-by-side comparison and ±1.5 % RH after one. A cooler zone with higher RH but the same W is reported as "RH differs because of temperature, not moisture" (`RH_DIFFERENCE_FROM_TEMPERATURE`).
+
+### Concrete surface probe (Ecowitt WN30 / WN30BL)
+
+- The WN30 is a wired temperature probe on a WN31-style transmitter. It shares the gateway's 8 temperature/RH channels (CH1–8) with the WN31s and reports temperature only, so its humidity field is empty or `--`. Stated accuracy is about ±1 °C (±2 °F). Map its channel (`ecowitt:chN`) with role **surface** and the zone it sits in.
+- Install it with the tip in firm contact with the concrete, secured mechanically and covered with a small piece of insulation, and keep the transmitter away from water. Put an air sensor in the same zone, because the margin uses that zone's dew point.
+- **Margin** = surface temperature − local air dew point. The risk class uses the *conservative* margin, which subtracts the combined probe and dew-point uncertainty (about 1.4 °F by default). The defaults are: more than 5 °F lower risk, 3–5 °F monitor, 0–3 °F elevated, 0 °F or below condensation possible. Improving a class needs an extra 0.5 °F (hysteresis).
+- **Estimated surface RH** = local vapor pressure / saturation pressure at the surface temperature. The display is capped at 100 %, while the uncapped value is kept and recorded. It is not a measurement of moisture inside the concrete.
+- The monitor reports three things separately:
+  1. **Now:** current conditions from measured indoor air.
+  2. **If outdoor air reached the surface:** the ventilation scenario.
+  3. **Next 12 hours:** the highest forecast outdoor dew point, a potential future exposure.
+  Humid outdoor air alone is never reported as condensation happening now.
+- **TAMO** predicts each probe's temperature with and without the exterior fans using the same coupled model. The surface follows a fraction *f* of the air-temperature change (0.5 until learned from data) and the rest of the structure change. TAMO then compares that with the zone's predicted dew point. Cold, dry air is credited when the dew point falls faster than the concrete cools.
+- **Alerts:** advisory (sustained conservative margin below 5 °F), warning (below 3 °F), high risk (at or below 0 °F) and persistent (near saturation for 6 h by default). Each alert explains the likely cause, for example "Concrete temperature has fallen while the basement dew point stays elevated". No alert ever says the surface is wet, because the probe cannot detect water.
+- If the probe fails, probe-based predictions stop, the general dew-point protection keeps working, and an alert says direct surface monitoring is unavailable.
+
+### Circulation fans (Honeywell HT-900 on smart plugs)
+
+- Each fan has its own plug. The plug uses the same adapter as the exterior fans (Tapo, Shelly, Home Assistant or mock), and a circulator may not share a plug with an exterior fan. Control is ON/OFF only, with the speed set on the fan. Energy is measured where the plug meters power and estimated from rated watts otherwise.
+- **Zone connections** (Settings) describe which zones each fan links, the intended direction, assumed exchange flows, and where the fan sits. They describe intended circulation, not proven airflow.
+- **Decision priority** for each fan:
+  1. Electrical safety: disabled, water-intrusion lockout, or plug state unconfirmed.
+  2. Manual override.
+  3. Condensation restriction: the fan is blocked when mixing would raise the dew point at a monitored surface (`CIRCULATION_WORSENS_SURFACE_RISK`), and the controller only warns when a surface is at risk but a zone reading is missing.
+  4. Surface protection: mixing would bring lower-dew-point air to a surface at risk.
+  5. Local humidity and beneficial mixing, triggered by persistent high RH or a moisture difference beyond sensor uncertainty. The fan runs only when the predicted RH drop in the target zone is worthwhile and does not just move the problem.
+  6. Exterior-ventilation support, for assigned fans only, plus a short run afterwards.
+  7. Optional scheduled mixing (10 min on, 30 min off by default, experimental).
+  8. Energy optimization.
+
+  Minimum on/off times and hysteresis apply.
+- Circulation **never counts as moisture removal**. When every zone is humid and neither ventilation nor a dehumidifier is removing water, the decision says so (`NO_MOISTURE_REMOVAL_PATH`).
+- **Shadow mode is the default.** The controller decides and logs what each fan would do but never switches it. Manual ON/OFF always works except under the water-intrusion lockout. Automatic mode switches only fans marked **commissioned**, and the API refuses automatic mode until at least one fan is.
+- **Plug failures:** an unreachable plug shows its state as *unknown*, never as ON or OFF. A command that isn't confirmed is logged and locked out for 30 minutes instead of being retried rapidly. Exterior ventilation and the other fan keep running.
+
+### Commissioning checklist (before automatic circulation)
+
+1. Plug each HT-900 straight into an outlet and check that it runs. Set its speed and confirm the switch stays there.
+2. Put it on its smart plug. Switch the plug off and on from the dashboard and confirm the fan restarts by itself.
+3. Check the plug's rating against the fan motor (an HT-900 draws roughly 20–40 W).
+4. Run **Diagnostics, Sensor side-by-side comparison** with all three air sensors together for 24–48 hours, then apply the stable offsets. Raw readings are kept, and the applied offsets and date are recorded.
+5. Check the concrete probe against a reference thermometer taped next to it.
+6. Leave circulation in **Shadow** for a week or two. Then look at **History, Circulation effectiveness**, which compares fan-on and fan-off periods under similar exterior ventilation and is informational only.
+7. Tick **Commissioned** for each fan (Settings, Circulation fans) and switch circulation to **Automatic**.
+
+**Water and electrical safety:** don't energize fans or plugs in or near standing water. Keep them above known flood levels and use GFCI-protected outlets. A smart plug doesn't make a household fan suitable for a wet location. Sensors can't replace these precautions.
+
+### Multi-zone simulation
+
+The Simulation page compares eight circulation strategies with the same exterior ventilation: none, fan 1, fan 2, both, humidity-triggered, ventilation-assisted, combined adaptive and periodic. Zones exchange air through a mass-balanced two-way exchange, so total water is conserved to rounding (shown as "conserved" in each row). The only water changes come from modeled sources, ventilation, condensation on the concrete node and dehumidification. Results include per-zone mean and max RH, time above target, zone moisture differences, surface risk hours, fan hours, kWh and water removed by exterior ventilation.
+
+### V3 test map
+
+| Spec scenario | Test (`tests/test_v3.py`) |
+|---|---|
+| A isolated humid pocket | `test_scenario_a_isolated_humid_pocket_turns_on_fan1` |
+| B cold pocket, high RH | `test_scenario_b_cold_pocket_high_rh_is_not_called_wetter` |
+| C concrete below dew point | `test_scenario_c_concrete_below_dew_point_alerts_and_evaluates_fans` |
+| D humid outdoors, cold concrete | `test_scenario_d_humid_outdoors_cold_concrete_flags_outdoor_air_only` |
+| E cold dry ventilation | `test_scenario_e_cold_dry_ventilation_uses_probe_in_tamo` |
+| F ventilation helps remote pocket | `test_scenario_f_exterior_ventilation_support_turns_on_assigned_fan_only` |
+| G fan creates adverse conditions | `test_scenario_g_fan_would_carry_high_dew_point_air_to_cold_wall` |
+| H sensor disagreement | `test_scenario_h_colocated_sensor_disagreement`, `…_controller_comparison_and_apply_offsets` |
+| I smart plug failure | `test_scenario_i_plug_failure_is_reported_and_not_retried_rapidly` |
+| J no removal path | `test_scenario_j_no_removal_path_is_not_called_moisture_removal` |
+| physics | internal mixing conserves water, multi-zone simulation conserves water, gradient vs uncertainty, surface RH and classes with hysteresis |
+| safety | shadow mode never switches, manual override and expiry, water lockout blocks manual, zone sensor failure, probe failure |
+| learning | `test_effectiveness_learning_detects_a_fan_that_mixes` |
+| API | `test_api.py::test_v3_zone_surface_circulation_endpoints` |
+
 ---
 
 ## Fail-safe behavior
@@ -209,6 +288,9 @@ Cooling raises RH without adding water. The Dashboard splits each recent RH chan
 | Plug unreachable | Last known state shown separately from verified state, group marked unverified, other fans in the group turned off |
 | Startup or power restore | Reads every plug, turns anything that was ON to OFF, logs the reconciliation, then resumes |
 | Controller computer dies | The plug's own auto-off timer stops the fan within `hardware_max_on_minutes` (30 by default). The controller re-arms it every tick while a fan should run. A dashboard alert appears if the plug has no working timer. |
+| Zone sensor fails (V3) | That zone shows as unavailable; no value is extrapolated; circulation rules that need it pause; exterior control continues |
+| Concrete probe fails (V3) | Probe predictions stop, general dew-point protection stays, alert shown |
+| Circulation plug fails (V3) | State shown as unknown, one logged failure then a 30-minute lockout, other equipment unaffected |
 | Manual override | Time-limited and logged. Maintenance mode bypasses interlocks only on purpose and shows a warning. |
 
 Every decision change, command, fault, alert and override is logged with readings, the decision, the reason code, the command and the confirmed switch state (Events page).
@@ -253,7 +335,7 @@ Fits natural air changes and effective fan CFM to how basement humidity actually
 
 ## Calibrating sensors and assumptions
 
-- **Sensors:** place all the WN31s together for a few hours, then enter temperature and RH offsets per sensor (Settings, Sensors).
+- **Sensors:** use Diagnostics, Sensor side-by-side comparison: place the air sensors together for 24–48 hours, then apply the suggested offsets. You can also type offsets in Settings, Sensors.
 - **Surface temperature:** without a surface probe, measure the coldest slab or wall spot with an IR thermometer in the warmest, most humid week. Enter a value a few °F *below* that as the conservative estimate. Auto mode stays off until you do this or add a probe.
 - **Fan airflow:** rated CFM overstates installed airflow, often by 20–40 % with ducting and grilles. Enter your best estimate as "actual CFM".
 - **Defaults for this house:** one Tjernlund V2D UnderAire (two 110 CFM fans, 220 CFM and about 40 W total, on one plug) exhausting a 24,000 ft³ basement. That is about 0.55 air changes per hour from the fan. The V2D sits in a vent opening with no ducting, so the default takes the full 220 CFM as installed airflow. The calibration on the Reports page can check that once a few weeks of data exist.
@@ -275,6 +357,10 @@ backend/ventctl/
   airflow.py      fan flow paths, moisture transfer, energy and conditioned-air penalty
   engine.py       pure decision engine (no I/O): modes, safety, hysteresis, explanations
   sensors.py      readings, validation, calibration, zone aggregation
+  zones.py        V3 zone status, moisture gradient vs sensor uncertainty, sensor comparison
+  surfaces.py     V3 concrete probe margin, surface RH, risk classes, alerts' causes, follow-fraction fit
+  circulation.py  V3 circulation-fan decision engine and two-box mixing physics
+  zonesim.py      V3 multi-zone simulation and the eight circulation strategies
   controller.py   runtime loop, switching, verification, fail-safes, alerts, history
   coupled.py      coupled temperature-moisture model shared by engine, simulator and mock
   thermal.py      two-node air/structure thermal model (exact solution)

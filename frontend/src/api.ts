@@ -53,6 +53,20 @@ export const api = {
   thermalFit: () => req("POST", "/api/thermal/fit"),
   forecast: () => req("GET", "/api/forecast"),
   simRuns: () => req("GET", "/api/sim/runs"),
+  zones: () => req("GET", "/api/zones"),
+  zoneStats: (range: string) => req("GET", `/api/zones/stats?range=${range}`),
+  surfaces: () => req("GET", "/api/surfaces"),
+  circulation: () => req("GET", "/api/circulation"),
+  circulationMode: (mode: string) => req("POST", "/api/circulation/mode", { mode }),
+  circulatorManual: (id: string, state: string, minutes?: number) =>
+    req("POST", `/api/circulators/${id}/manual`, { state, minutes }),
+  circulationCycles: (id?: string) => req("GET", `/api/circulation/cycles${id ? `?circulator_id=${id}` : ""}`),
+  circulationEffectiveness: (range = "30d") => req("GET", `/api/circulation/effectiveness?range=${range}`),
+  compareStatus: () => req("GET", "/api/sensors/compare"),
+  compareAction: (action: string, sensor_ids?: string[], apply = false) =>
+    req("POST", "/api/sensors/compare", { action, sensor_ids, apply }),
+  simZones: (body: Json) => req("POST", "/api/sim/zones", body),
+  simZoneStrategies: () => req("GET", "/api/sim/zones/strategies"),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),

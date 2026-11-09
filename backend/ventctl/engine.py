@@ -182,7 +182,8 @@ def decide(
         look = tamo.outlook(ind, outd, up_air, effect, config, tp, state.is_on, config.temperature.horizon_min,
                             minutes=mins)
         _, e_value = profile_thresholds(config)
-        tres = tamo.evaluate(ind, outd, effect, look, config, state.is_on, cond.surface_c, e_value)
+        tres = tamo.evaluate(ind, outd, effect, look, config, state.is_on, cond.surface_c, e_value,
+                             surfaces=cond.surfaces, air_follow=cond.surface_follow)
         tamo_out = {
             "in_control": policy == ControlPolicy.TAMO,
             "terms": {"benefit_g_h": tres.benefit_g_h, "thermal_penalty_g_h": tres.thermal_penalty_g_h,
@@ -448,7 +449,8 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
             lk = tamo.outlook(ind, out_air, up_air, eff, config, look.params, False, h, minutes=(int(h),))
             if _thermal_safety(cond, lk, config):
                 return None
-            return tamo.evaluate(ind, out_air, eff, lk, config, False, cond.surface_c, e_value)
+            return tamo.evaluate(ind, out_air, eff, lk, config, False, cond.surface_c, e_value,
+                                 surfaces=cond.surfaces, air_follow=cond.surface_follow)
         choice = tamo.forecast_choice(cond.forecast, now, at, tres, config)
         if choice:
             metrics_fc = {**choice, "forecast_age_h": cond.forecast_age_h}

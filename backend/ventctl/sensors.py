@@ -43,6 +43,8 @@ class ValidatedReading:
     message: str = ""
     duplicate: bool = False
     source: str = "mock"
+    raw_temp_c: float | None = None  # as reported by the device, before calibration offsets
+    raw_rh_pct: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -72,6 +74,9 @@ class ValidatedReading:
             "message": self.message,
             "duplicate": self.duplicate,
             "source": self.source,
+            "raw_temp_c": self.raw_temp_c, "raw_rh_pct": self.raw_rh_pct,
+            "temp_offset_f": self.mapping.temp_offset_f, "rh_offset_pct": self.mapping.rh_offset_pct,
+            "calibrated_at": self.mapping.calibrated_at,
         }
 
 
@@ -97,6 +102,7 @@ def validate(
         pressure_kpa=reading.pressure_kpa or default_pressure_kpa, diff_pressure_pa=reading.diff_pressure_pa,
         battery_low=reading.battery_low, signal=reading.signal, source=reading.source,
         duplicate=previous_ts is not None and reading.ts == previous_ts,
+        raw_temp_c=reading.temp_c, raw_rh_pct=reading.rh_pct,
     )
     if age > stale_after_s:
         v.status = "stale"
@@ -169,7 +175,8 @@ class Conditions:
     upstairs: AirState | None
     diff_pressure_pa: float | None
     zones: dict[str, dict] = field(default_factory=dict)
-    surfaces: list[dict] = field(default_factory=list)  # every valid surface probe {name, t_c}
+    surfaces: list[dict] = field(default_factory=list)  # valid surface probes {name, t_c, zone, local, exposure}
+    surface_follow: float = 0.5  # fraction of an air-temperature change the surface follows within the horizon
     pipe_c: float | None = None  # coldest pipe / vulnerable-spot sensor
     pipe_label: str | None = None
     pipe_sensors: int = 0  # configured pipe sensors (valid or not)
@@ -247,10 +254,26 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
         outdoor=outdoor, outdoor_problem=outdoor_problem,
         surface_c=surface_c, surface_source=surface_source, surface_label=surface_label,
         upstairs=up, diff_pressure_pa=dp, zones=zones,
-        surfaces=[{"name": r.mapping.name, "t_c": r.temp_c} for r in surf],
+        surfaces=[_surface_entry(r, snapshot, config) for r in surf],
         pipe_c=pipe.temp_c if pipe else None, pipe_label=pipe.mapping.name if pipe else None,
         pipe_sensors=len(pipes_all),
     )
+
+
+def _zone_air(snapshot: Snapshot, zone: str | None) -> AirState | None:
+    if not zone:
+        return None
+    airs = [r.air() for r in snapshot.by_role(SensorRole.BASEMENT) if r.ok and r.mapping.zone == zone]
+    airs = [a for a in airs if a is not None]
+    if not airs:
+        return None
+    return AirState.from_t_w(sum(a.t_c for a in airs) / len(airs), sum(a.w for a in airs) / len(airs), airs[0].p_kpa)
+
+
+def _surface_entry(r: ValidatedReading, snapshot: Snapshot, config: AppConfig) -> dict:
+    z = config.zone(r.mapping.zone)
+    return {"name": r.mapping.name, "t_c": r.temp_c, "sensor_id": r.mapping.sensor_id, "zone": r.mapping.zone,
+            "local": _zone_air(snapshot, r.mapping.zone), "exposure": z.ventilation_exposure if z else 1.0}
 
 
 __all__ = [

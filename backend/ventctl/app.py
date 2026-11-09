@@ -106,6 +106,28 @@ class PolicyRequest(BaseModel):
     policy: ControlPolicy
 
 
+class CirculatorManual(BaseModel):
+    state: str  # "on" | "off" | "auto"
+    minutes: float | None = None
+
+
+class CirculationModeRequest(BaseModel):
+    mode: str  # "off" | "shadow" | "auto"
+
+
+class CompareRequest(BaseModel):
+    action: str  # "start" | "stop"
+    sensor_ids: list[str] | None = None
+    apply: bool = False
+
+
+class ZoneSimRequest(BaseModel):
+    params: simulation.SimParams = simulation.SimParams(duration_h=72)
+    profile_id: str = "nola_front"
+    strategies: list[str] | None = None
+    exterior_strategy: str = "optimized"
+
+
 class CalcRequest(BaseModel):
     t_f: float
     rh_pct: float
@@ -440,6 +462,113 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
                                 continue
                             break
         return reports.annual(ctrl().config, req.params, observed)
+
+    # ---------------------------------------------------------------- Version 3: zones, surfaces, circulation
+    @app.get("/api/zones")
+    def get_zones():
+        c = ctrl()
+        from . import zones as zmod
+        zs = c.zone_status
+        ids = list(zs)
+        grads = []
+        for k in c.config.connections:
+            if k.zone_a in zs and k.zone_b in zs:
+                grads.append({"connection": k.id, **zmod.gradient(zs[k.zone_a], zs[k.zone_b], c.config)})
+        pairs = [zmod.gradient(zs[a], zs[b], c.config) for i, a in enumerate(ids) for b in ids[i + 1:]]
+        return {"zones": {k: z.to_dict() for k, z in zs.items()}, "summary": zmod.summary(zs, c.config),
+                "connections": grads, "pairs": pairs,
+                "config": {"zones": [z.model_dump() for z in c.config.zones],
+                           "connections": [k.model_dump() for k in c.config.connections]}}
+
+    @app.get("/api/surfaces")
+    def get_surfaces():
+        c = ctrl()
+        return {"surfaces": [s.to_dict() for s in c.surface_status], "model": c.surface_learned,
+                "settings": c.config.surfaces.model_dump()}
+
+    @app.get("/api/circulation")
+    def get_circulation():
+        c = ctrl()
+        return {"mode": c.config.circulation.mode, "circulators": c._circ_status(c.clock.now()),
+                "settings": c.config.circulation.model_dump()}
+
+    @app.post("/api/circulators/{cid}/manual")
+    def circulator_manual(cid: str, req: CirculatorManual):
+        if req.state not in ("on", "off", "auto"):
+            raise HTTPException(400, "state must be on, off or auto")
+        if req.minutes is not None and not (1 <= req.minutes <= 24 * 60):
+            raise HTTPException(400, "minutes must be between 1 and 1440")
+        try:
+            ctrl().set_circulator_manual(cid, req.state, req.minutes)
+        except KeyError:
+            raise HTTPException(404, "unknown circulator")
+        return get_circulation()
+
+    @app.post("/api/circulation/mode")
+    def circulation_mode(req: CirculationModeRequest):
+        if req.mode not in ("off", "shadow", "auto"):
+            raise HTTPException(400, "mode must be off, shadow or auto")
+        c = ctrl()
+        if req.mode == "auto" and not any(x.commissioned for x in c.config.circulators):
+            raise HTTPException(400, "No circulation fan is marked as commissioned. Complete the commissioning "
+                                     "checklist in Settings > Internal Air Circulation first.")
+        c.set_circulation_mode(req.mode)
+        return get_circulation()
+
+    @app.get("/api/circulation/cycles")
+    def circulation_cycles(circulator_id: str | None = None, limit: int = 200):
+        return state["storage"].circulation_cycles(circulator_id, limit)
+
+    @app.get("/api/circulation/effectiveness")
+    def circulation_effectiveness(range: str = "30d", start: str | None = None, end: str | None = None):
+        s, e = analysis.range_for(range, ctrl().clock.now(), start, end)
+        rows = state["storage"].history(s, e, 10**7)
+        return analysis.circulation_effectiveness(rows, state["storage"].circulation_cycles(None, 2000),
+                                                  ctrl().config)
+
+    @app.get("/api/zones/stats")
+    def zone_stats(range: str = "24h", start: str | None = None, end: str | None = None):
+        s, e = analysis.range_for(range, ctrl().clock.now(), start, end)
+        return analysis.zone_stats(state["storage"].history(s, e, 10**7), ctrl().config)
+
+    @app.get("/api/sensors/compare")
+    def compare_status():
+        c = ctrl()
+        return {**c.comparison_status(), "last": state["storage"].get_kv("sensor_comparison_last")}
+
+    @app.post("/api/sensors/compare")
+    def compare_action(req: CompareRequest):
+        c = ctrl()
+        if req.action == "start":
+            from .config import SensorRole
+            ids = req.sensor_ids or [m.sensor_id for m in c.config.sensors.mappings
+                                     if m.role == SensorRole.BASEMENT and m.enabled]
+            if len(ids) < 2:
+                raise HTTPException(400, "pick at least two temperature/RH sensors")
+            known = {m.sensor_id for m in c.config.sensors.mappings}
+            if not set(ids) <= known:
+                raise HTTPException(400, "unknown sensor id")
+            return c.comparison_start(ids)
+        if req.action == "stop":
+            return c.comparison_stop(req.apply)
+        raise HTTPException(400, "action must be start or stop")
+
+    @app.post("/api/sim/zones")
+    def sim_zones(req: ZoneSimRequest):
+        from . import zonesim
+        try:
+            prof = climate.get_profile(req.profile_id)
+        except KeyError:
+            raise HTTPException(404, "unknown profile")
+        try:
+            return zonesim.compare_circulation(req.params, prof, ctrl().config, req.strategies, req.exterior_strategy)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/sim/zones/strategies")
+    def sim_zone_strategies():
+        from . import zonesim
+        return [{"id": k, "name": v[0], "description": v[1]} for k, v in zonesim.CIRC_STRATEGIES.items()]
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):
