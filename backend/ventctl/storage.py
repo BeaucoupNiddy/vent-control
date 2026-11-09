@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from .config import AppConfig
+from .config import DEFAULTS_VERSION, AppConfig, upgrade_defaults
 
 MIGRATIONS: list[str] = [
     # 1: initial schema
@@ -98,6 +98,12 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX idx_circ_cycles ON circulation_cycles(circulator_id, ts_start);
     """,
+    # 5: physics review: upstairs air and the air at the exhaust fan, to learn the upstairs share of makeup air
+    """
+    ALTER TABLE history ADD COLUMN upstairs_t_c REAL;
+    ALTER TABLE history ADD COLUMN upstairs_w REAL;
+    ALTER TABLE history ADD COLUMN exhaust_w REAL;   -- humidity ratio of the ventilation-path zones (air at the fan)
+    """,
 ]
 
 
@@ -139,7 +145,19 @@ class Storage:
     # ---------------------------------------------------------------- config
     def load_config(self) -> AppConfig | None:
         row = self._fetchone("SELECT value FROM settings WHERE key='config'")
-        return AppConfig.model_validate_json(row["value"]) if row else None
+        if not row:
+            return None
+        cfg = AppConfig.model_validate_json(row["value"])
+        done = self.get_kv("defaults_version") or 0
+        if done < DEFAULTS_VERSION:
+            changes = upgrade_defaults(cfg, done)
+            if changes:
+                self.save_config(cfg)
+                self.add_event(datetime.now(timezone.utc), "config", "info",
+                               "Updated settings that still had old defaults: " + "; ".join(changes),
+                               "DEFAULTS_UPGRADED", {"changes": changes})
+            self.set_kv("defaults_version", DEFAULTS_VERSION)
+        return cfg
 
     def save_config(self, config: AppConfig) -> None:
         with self._lock:

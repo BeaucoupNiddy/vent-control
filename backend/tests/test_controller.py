@@ -154,5 +154,5 @@ def test_storage_migrations_idempotent(tmp_path):
     s = Storage(p)
     s.save_config(example_config())
     s2 = Storage(p)
-    assert s2.migrate() == 4
+    assert s2.migrate() == 5
     assert s2.load_config().fans[0].id == "v2d"
