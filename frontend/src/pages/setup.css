@@ -1,0 +1,73 @@
+/* Guided setup and worksheet. Uses the shared tokens in styles.css. */
+.setup { display: grid; gap: 16px; }
+.su-bar { height: 8px; border-radius: 99px; background: var(--surface-2); overflow: hidden; }
+.su-fill { height: 100%; background: var(--good); transition: width 0.3s; }
+.su-paused { margin-top: 10px; }
+.su-layout { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+.su-steps { display: flex; flex-direction: column; gap: 4px; position: sticky; top: 72px; }
+.su-step { display: flex; gap: 10px; align-items: center; text-align: left; padding: 8px 10px; border-radius: 10px;
+  border: 1px solid transparent; background: none; color: var(--text); cursor: pointer; font: inherit; }
+.su-step:hover { background: var(--surface-2); }
+.su-step.active { background: var(--surface); border-color: var(--border); box-shadow: var(--shadow); }
+.su-num { flex: none; width: 24px; height: 24px; border-radius: 50%; display: grid; place-items: center; font-size: 12px;
+  border: 1.5px solid var(--border); color: var(--text-2); }
+.su-step.done .su-num { background: var(--good); border-color: var(--good); color: #fff; }
+.su-step.skipped .su-num { border-style: dashed; }
+.su-step.ready:not(.done) .su-num { border-color: var(--good); }
+.su-st { display: flex; flex-direction: column; font-size: 14px; }
+@media (max-width: 800px) { .su-layout { grid-template-columns: 1fr; } .su-steps { flex-direction: row; overflow-x: auto; position: static; padding-bottom: 4px; } .su-step { min-width: 150px; } }
+.su-st small { color: var(--text-3); font-size: 12px; }
+.su-howto p { margin: 0 0 10px; line-height: 1.5; color: var(--text-2); }
+.su-howto a { color: var(--accent); }
+.su-h3 { margin: 18px 0 8px; font-size: 15px; }
+.su-check { display: flex; gap: 8px; align-items: flex-start; align-self: end; margin: 6px 0; font-size: 14px; cursor: pointer; }
+.su-check input { margin-top: 2px !important; }
+.su-unsaved { color: #b07a00; margin: 10px 0 0; }
+.su-checks { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.su-c { display: flex; gap: 10px; padding: 8px 10px; border-radius: 10px; background: var(--surface-2); }
+.su-c.ok { background: var(--good-bg); }
+.su-c.fail { background: var(--crit-bg); }
+.su-c.warn { background: var(--warn-bg); }
+.su-ic { flex: none; margin-top: 2px; }
+.su-c.ok .su-ic { color: var(--good); }
+.su-c.fail .su-ic { color: var(--critical); }
+.su-c.warn .su-ic { color: #b07a00; }
+.su-c.todo .su-ic { color: var(--text-3); }
+.su-confirm { display: flex; gap: 8px; align-items: flex-start; cursor: pointer; }
+.su-confirm input { margin-top: 3px; }
+.su-detail { font-size: 13px; color: var(--text-2); margin-top: 2px; line-height: 1.45; }
+.su-gas { display: grid; gap: 4px; margin-top: 6px; }
+.su-gas label { flex-wrap: nowrap; align-items: flex-start; }
+.su-gas input { margin-top: 3px; flex: none; }
+.su-nav { display: flex; gap: 8px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); flex-wrap: wrap; }
+.su-test { margin: 10px 0; }
+.su-circ { padding: 10px 0 14px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.su-new td { background: var(--warn-bg); }
+.setup-banner { margin-bottom: 16px; }
+
+/* worksheet */
+.worksheet { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 24px; max-width: 1000px; margin: 0 auto; }
+.worksheet h1 { font-size: 22px; margin: 12px 0 2px; }
+.worksheet h2 { font-size: 16px; margin: 22px 0 6px; }
+.ws-sub, .ws-note { color: var(--text-2); font-size: 13px; margin: 2px 0 8px; }
+.ws-tools { flex-wrap: wrap; }
+.ws-t { width: 100%; border-collapse: collapse; font-size: 13px; }
+.ws-t th { text-align: left; font-weight: 600; padding: 6px 8px 6px 0; white-space: nowrap; vertical-align: bottom; }
+.ws-t th small { display: block; font-weight: 400; color: var(--text-3); white-space: normal; }
+.ws-t td { padding: 4px 8px 4px 0; vertical-align: bottom; }
+.ws-grid thead th { border-bottom: 1px solid var(--border); color: var(--text-2); font-weight: 500; }
+.ws-grid tbody tr { border-bottom: 1px solid var(--border); }
+.ws-in { width: 100%; min-width: 40px; border: none; border-bottom: 1px solid var(--text-3); border-radius: 0; background: transparent;
+  padding: 4px 2px; font: inherit; color: var(--text); }
+.ws-in:focus { outline: none; border-bottom-color: var(--accent); }
+.ws-notes { width: 100%; font: inherit; border: 1px solid var(--text-3); border-radius: 6px; padding: 6px; background: transparent; color: var(--text); }
+@media (max-width: 700px) { .worksheet { padding: 14px; } .ws-t { display: block; overflow-x: auto; } }
+
+@media print {
+  .topbar, .ws-tools, footer, .setup-banner { display: none !important; }
+  body, .main { background: #fff !important; color: #000 !important; padding: 0 !important; }
+  .worksheet { border: none; padding: 0; max-width: none; color: #000; }
+  .ws-in, .ws-notes { color: #000; border-color: #000; }
+  .ws-in::placeholder { color: #999; }
+  .worksheet section { break-inside: avoid; }
+}

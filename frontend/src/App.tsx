@@ -8,10 +8,11 @@ import Home from "./pages/Home";
 import History from "./pages/History";
 import Reports from "./pages/Reports";
 import Settings from "./pages/Settings";
+import Setup from "./pages/Setup";
 import Simulation from "./pages/Simulation";
 import { TempUnit, UnitContext } from "./units";
 
-const TABS = ["Home", "Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
+const TABS = ["Home", "Setup", "Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
 type Tab = (typeof TABS)[number];
 
 function load<T>(k: string, d: T): T {
@@ -29,6 +30,8 @@ export default function App() {
   const [unit, setUnit] = useState<TempUnit>(() => load("ventctl.unit", "F"));
   const [status, setStatus] = useState<Json>(null);
   const [offline, setOffline] = useState(false);
+  const [setup, setSetup] = useState<Json>(null);
+  useEffect(() => { if (tab === "Home") api.setup(false).then(setSetup).catch(() => setSetup(null)); }, [tab]);
 
   const refresh = useCallback(() => {
     api.status().then((s) => { setStatus(s); setOffline(false); }).catch(() => setOffline(true));
@@ -71,11 +74,18 @@ export default function App() {
       <main className="main">
         {offline && <div className="alert critical"><span className="icon"><Icon name="alert" /></span>
           <div><strong>Controller unreachable.</strong> The dashboard cannot reach the backend. Fans keep their last state; plug auto-off timers (if configured) still apply.</div></div>}
+        {tab === "Home" && setup && !setup.finished && (
+          <div className="alert info setup-banner"><span className="icon"><Icon name="info" /></span>
+            <div><strong>{setup.done === 0 && !setup.progress.started_at ? "Ready to connect your real sensors and fans?" : setup.progress.paused ? "Setup is paused." : "Setup in progress."}</strong>{" "}
+              {setup.done} of {setup.total} steps done. The guided setup checks each item as you go, and you can pause any time.
+              <div style={{ marginTop: 6 }}><button className="btn primary" onClick={() => setTab("Setup")}>{setup.progress.started_at ? "Resume setup" : "Start setup"}</button></div></div>
+          </div>)}
         {tab === "Home" && <Home status={status} refresh={refresh} openTab={(t) => setTab(t as Tab)} />}
         {tab === "Dashboard" && <Dashboard status={status} refresh={refresh} />}
         {tab === "History" && <History />}
         {tab === "Simulation" && <Simulation />}
         {tab === "Reports" && <Reports />}
+        {tab === "Setup" && <Setup onSaved={refresh} />}
         {tab === "Settings" && <Settings onSaved={refresh} />}
         {tab === "Events" && <Events />}
         {tab === "Diagnostics" && <Diagnostics status={status} />}

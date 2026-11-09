@@ -67,6 +67,9 @@ export const api = {
     req("POST", "/api/sensors/compare", { action, sensor_ids, apply }),
   simZones: (body: Json) => req("POST", "/api/sim/zones", body),
   simZoneStrategies: () => req("GET", "/api/sim/zones/strategies"),
+  setup: (probe = true) => req("GET", `/api/setup?probe=${probe}`),
+  setupProgress: (body: Json) => req("PUT", "/api/setup/progress", body),
+  setupReset: () => req("POST", "/api/setup/reset"),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),

@@ -10,6 +10,8 @@ A local web app that decides when exchanging basement air with outdoor air actua
 
 ## Quick start
 
+**Setting up real hardware?** Follow the [setup guide](docs/SETUP_GUIDE.md) (physical installation of each device, then the app). In the app, the **Setup** tab walks you through every step, checks each one, prints a worksheet, and can be paused and resumed from any device.
+
 ### macOS (easiest)
 
 ```bash
