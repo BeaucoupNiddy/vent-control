@@ -6,6 +6,8 @@ Flow paths (volumetric flows at the fan):
   * if Qe > Qi the shortfall (Qe - Qi) is made up through passive vents and
     leaks. An assumed fraction f of that shortfall comes from the conditioned
     upstairs (through the floor); the rest comes from outdoors.
+  * the upstairs air costs HVAC energy only while the heating or AC is running
+    (judged from outdoor temperature, see HouseSettings)
   * if Qi > Qe the basement is pressurized and the excess pushes basement air
     into the house / out through leaks. Flagged as a warning.
 
@@ -21,7 +23,7 @@ from dataclasses import asdict, dataclass
 from . import psychro
 from .config import Fan, FanType, HouseSettings
 from .psychro import AirState
-from .units import cfm_to_m3s, g_per_h_to_gal_per_day, grams_to_gallons
+from .units import c_to_f, cfm_to_m3s, g_per_h_to_gal_per_day, grams_to_gallons
 
 
 @dataclass
@@ -48,6 +50,29 @@ class VentilationEffect:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def hvac_running(outdoor: AirState, house: HouseSettings) -> str | None:
+    """'heating', 'cooling' or None, judged from the outdoor temperature."""
+    t_f = c_to_f(outdoor.t_c)
+    if t_f < house.heating_below_outdoor_f:
+        return "heating"
+    if t_f > house.cooling_above_outdoor_f:
+        return "cooling"
+    return None
+
+
+def hvac_penalty_w(m_up: float, outdoor: AirState, upstairs: AirState, house: HouseSettings) -> float:
+    """Extra HVAC electricity [W] to condition the outdoor air that replaces m_up [kg/s] drawn from upstairs."""
+    if m_up <= 0:
+        return 0.0
+    mode = hvac_running(outdoor, house)
+    if mode == "cooling":
+        dh = outdoor.enthalpy_kj_kg - upstairs.enthalpy_kj_kg
+        return m_up * dh * 1000 / house.cooling_cop if dh > 0 else 0.0
+    if mode == "heating" and outdoor.t_c < upstairs.t_c:
+        return m_up * psychro.CP_DA * (upstairs.t_c - outdoor.t_c) * 1000 / house.heating_cop
+    return 0.0
 
 
 def ventilation_effect(
@@ -89,15 +114,10 @@ def ventilation_effect(
     rem_up = m_up * (indoor.w - upstairs.w) * 3600 * 1000
     net = rem_out + rem_up
 
-    # Air pulled from upstairs is replaced upstairs by outdoor infiltration that the
-    # HVAC system must condition.
-    penalty_w = 0.0
-    if m_up > 0:
-        dh = outdoor.enthalpy_kj_kg - upstairs.enthalpy_kj_kg
-        if dh > 0:
-            penalty_w = m_up * dh * 1000 / house.cooling_cop
-        elif outdoor.t_c < upstairs.t_c:
-            penalty_w = m_up * psychro.CP_DA * (upstairs.t_c - outdoor.t_c) * 1000 / house.heating_cop
+    # Air pulled from upstairs is replaced upstairs by outdoor infiltration. That costs energy
+    # only while the HVAC is running: on mild days with heat and AC off the house floats and the
+    # replacement air is free.
+    penalty_w = hvac_penalty_w(m_up, outdoor, upstairs, house)
 
     total_w = fan_w + penalty_w
     eff = (net / (total_w / 1000.0)) if total_w > 0 else None

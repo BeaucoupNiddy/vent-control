@@ -196,6 +196,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const sim = !!status.simulation_mode;
   const manualLeft = timeUntil(g?.manual_until, status.now);
   const multiZone = Object.keys(status.zones || {}).length > 1;
+  const avg = multiZone && status.basement_average?.count > 1 ? status.basement_average : null;
 
   /* plain-words summary of what the system is doing */
   let doing: string;
@@ -221,8 +222,9 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const goodCount = hours.filter(goodHour).length;
 
   /* last 24 h chart rows */
-  const rows = hist.map((r) => ({ x: new Date(r.ts).getTime(), rh: r.indoor_rh, out: r.outdoor_rh, on: r.fans_on ? 1 : 0 }))
+  const rows = hist.map((r) => ({ x: new Date(r.ts).getTime(), rh: r.indoor_rh, avg: r.avg_rh, out: r.outdoor_rh, on: r.fans_on ? 1 : 0 }))
     .filter((r) => r.rh != null);
+  const showAvgLine = !!avg && rows.some((r) => r.avg != null);
   const fanHours = stats?.fan_runtime_h;
 
   const zones: Json[] = Object.values(status.zones || {});
@@ -247,6 +249,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
           <div className="h-hero-facts">
             <span><HIcon name="thermo" size={16} /> {temp(ind?.t_c, u, 0)}</span>
             <span><HIcon name="drop" size={16} /> feels {feelWord(ind?.dew_point_f).toLowerCase()}</span>
+            {avg && <span title="All areas mixed together"><HIcon name="home" size={16} /> whole basement {r0(avg.rh_pct)}</span>}
             {rh != null && <span><HIcon name="spark" size={16} /> goal under {targets.target}%</span>}
           </div>
         </div>
@@ -372,19 +375,21 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
                     return (
                       <div className="tooltip">
                         <div className="t-head">{new Date(r.x).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}</div>
-                        <div className="t-row"><span>Basement</span><strong>{r0(r.rh)}</strong></div>
+                        <div className="t-row"><span>{showAvgLine ? "Most humid area" : "Basement"}</span><strong>{r0(r.rh)}</strong></div>
+                        {showAvgLine && r.avg != null && <div className="t-row"><span>Whole basement</span><strong>{r0(r.avg)}</strong></div>}
                         {r.out != null && <div className="t-row"><span>Outside</span><strong>{r0(r.out)}</strong></div>}
                         <div className="t-row"><span>Fan</span><strong>{r.on ? "running" : "resting"}</strong></div>
                       </div>
                     );
                   }} />
                   <Area type="monotone" dataKey="rh" stroke="var(--h-blue)" strokeWidth={2.5} fill="url(#hRhFill)" isAnimationActive={false} dot={false} />
+                  {showAvgLine && <Area type="monotone" dataKey="avg" stroke="var(--h-violet)" strokeWidth={2} strokeDasharray="5 4" fill="none" isAnimationActive={false} dot={false} connectNulls />}
                 </AreaChart>
               </ResponsiveContainer>
               <div className="h-fanstrip" aria-label="When the fan ran">
                 {rows.map((r, i) => <span key={i} className={r.on ? "on" : ""} />)}
               </div>
-              <div className="h-legend"><span className="sw blue" />Basement humidity <span className="sw fan" />Fan running</div>
+              <div className="h-legend"><span className="sw blue" />{showAvgLine ? "Most humid area" : "Basement humidity"} {showAvgLine && <><span className="sw violet" />Whole basement </>}<span className="sw fan" />Fan running</div>
             </div>
           ) : <p className="faint">Not enough history yet. Check back in an hour.</p>}
         </Panel>
@@ -412,6 +417,30 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       {/* ---------- rooms ---------- */}
       {zones.length > 0 && (
         <Panel icon="home" title={zones.length > 1 ? "Around the basement" : "Basement area"}>
+          {avg && (
+            <div className={`h-room h-room-avg tone-${(LEVEL_WORD[avg.level] || { tone: "ok" }).tone}`}>
+              <div className="h-room-top">
+                <span className="h-room-drop"><HIcon name="home" size={18} /></span>
+                <span className="h-room-name">Whole basement</span>
+                <span className="faint">· average of {avg.count} areas</span>
+              </div>
+              <div className="h-room-temp">{temp(avg.t_c, u, 0)}</div>
+              <div>
+                <div className="h-room-rh">{r0(avg.rh_pct)}</div>
+                <div className="h-room-sub">
+                  <span>{(LEVEL_WORD[avg.level] || { word: avg.level }).word} · ranges {r0(avg.rh_min_pct)} to {r0(avg.rh_max_pct)}</span>
+                  {(() => {
+                    const tr = avg.trend?.rh_pct_h;
+                    const dir = tr == null || Math.abs(tr) < 0.3 ? "flat" : tr > 0 ? "up" : "down";
+                    return <span className={`h-trend ${dir}`}><HIcon name={dir} size={14} />{dir === "flat" ? "steady" : dir === "down" ? "drying" : "rising"}</span>;
+                  })()}
+                </div>
+              </div>
+              <p className="h-hint" style={{ margin: "6px 0 0" }}>
+                As if all the basement air were mixed together. The fan still watches the most humid area{avg.partial ? `. Not counted right now: ${avg.missing.join(", ")}` : ""}.
+              </p>
+            </div>
+          )}
           <div className="h-rooms">
             {zones.map((z) => {
               const lv = LEVEL_WORD[z.level] || { word: z.level, tone: "ok" as Tone };

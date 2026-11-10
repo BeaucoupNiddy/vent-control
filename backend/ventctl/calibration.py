@@ -322,3 +322,103 @@ def fit_thermal(rows: list[dict], config: AppConfig, horizon_min: float = 30) ->
 
 def _mean(xs: list[float]) -> float | None:
     return sum(xs) / len(xs) if xs else None
+
+
+# ---------------------------------------------------------------- upstairs share of the makeup air
+UPSTAIRS_FIT_WINDOW_MIN = 30  # compare the moisture trend just before and just after each fan start
+MIN_UPSTAIRS_CONTRAST = 0.001  # kg/kg: upstairs and outdoor air must differ this much for a start to be informative
+
+
+def _slope(pts: list[tuple[float, float]]) -> float | None:
+    """Least-squares slope of (t_s, w) points [kg/kg per s]."""
+    if len(pts) < 3:
+        return None
+    n = len(pts)
+    mt = sum(t for t, _ in pts) / n
+    mw = sum(w for _, w in pts) / n
+    sxx = sum((t - mt) ** 2 for t, _ in pts)
+    if sxx <= 0:
+        return None
+    return sum((t - mt) * (w - mw) for t, w in pts) / sxx
+
+
+def fit_upstairs_fraction(rows: list[dict], config: AppConfig) -> dict:
+    """Estimate the share of exhaust makeup air drawn from upstairs, from fan starts.
+
+    Just after a start the basement's moisture trend changes by what the fan air brings in:
+
+        M * (dW/dt_after - dW/dt_before) = m_fan * [(W_out - W) + f * (W_up - W_out)]
+
+    so with y = M * dSlope / m_fan - (W_out - W) and x = W_up - W_out, f is the slope of y on x
+    (through the origin) over many starts. Short windows keep the materials buffer and slow source
+    changes mostly out of it. Starts where upstairs and outdoor air hold about the same water tell us
+    nothing and are skipped. The fan airflow estimate is folded in: if the real airflow is lower than
+    configured, f is biased low. Needs an upstairs T/RH sensor.
+    """
+    fans = [f for f in config.fans if f.enabled]
+    qe = sum(f.actual_cfm for f in fans if f.type == FanType.EXHAUST)
+    qi = sum(f.actual_cfm for f in fans if f.type == FanType.INTAKE)
+    base = {"fraction": None, "starts_used": 0, "confidence": "none", "assumed": config.house.conditioned_air_fraction}
+    if qe <= 0 or qi > 0:
+        return {**base, "note": "Only exhaust-only fan setups can be fitted."}
+    _, vol_ft3 = path_zone_rows(rows, config)
+    xs: list[float] = []
+    ys: list[float] = []
+    win = UPSTAIRS_FIT_WINDOW_MIN * 60
+    for i in _cycle_starts(rows):
+        t0 = datetime.fromisoformat(rows[i]["ts"])
+        r0 = rows[i - 1]
+        w_key = "exhaust_w" if r0.get("exhaust_w") is not None else "indoor_w"
+        if any(r0.get(k) is None for k in (w_key, "outdoor_w", "upstairs_w", "indoor_t_c")):
+            continue
+        before, after = [], []
+        for r in rows[max(0, i - 40):i]:
+            dt = (datetime.fromisoformat(r["ts"]) - t0).total_seconds()
+            if -win <= dt < 0 and r.get(w_key) is not None and not (r.get("fans_on") or 0):
+                before.append((dt, r[w_key]))
+        for r in rows[i:i + 40]:
+            dt = (datetime.fromisoformat(r["ts"]) - t0).total_seconds()
+            if 0 <= dt <= win and r.get(w_key) is not None:
+                if not (r.get("fans_on") or 0) or not r.get("fans_verified", 1):
+                    after = []
+                    break
+                after.append((dt, r[w_key]))
+        sb, sa = _slope(before), _slope(after)
+        if sb is None or sa is None:
+            continue
+        # the secant slope matches the driving force near the middle of the window, not at the start
+        w = sum(v for _, v in after) / len(after)
+        w_out, w_up = r0["outdoor_w"], r0["upstairs_w"]
+        x = w_up - w_out
+        if abs(x) < MIN_UPSTAIRS_CONTRAST:
+            continue
+        m_air = vol_ft3 * M3_PER_FT3 * psychro.dry_air_density(r0["indoor_t_c"], w)
+        m_fan = cfm_to_m3s(qe) * psychro.dry_air_density(r0["indoor_t_c"], w)
+        # natural infiltration keeps going; it pushes back harder as the fan dries the air below its start value
+        m_nat = config.house.natural_ach * m_air / 3600
+        nat = m_nat * (r0[w_key] - w)
+        xs.append(x)
+        ys.append((m_air * (sa - sb) - nat) / m_fan - (w_out - w))
+    n = len(xs)
+    if n == 0:
+        return {**base, "note": "No informative fan starts yet (needs an upstairs sensor and days when upstairs and "
+                                "outdoor air hold different amounts of water)."}
+    sxx = sum(x * x for x in xs)
+    f = sum(x * y for x, y in zip(xs, ys)) / sxx
+    se = math.sqrt(sum((y - f * x) ** 2 for x, y in zip(xs, ys)) / max(1, n - 1) / sxx) if n > 1 else 1.0
+    f_c = min(1.0, max(0.0, f))
+    conf = "high" if n >= 8 and se < 0.08 else "medium" if n >= 4 and se < 0.15 else "low"
+    return {"fraction": f_c, "raw_fraction": f, "std_error": se, "low": max(0.0, f - 1.96 * se),
+            "high": min(1.0, f + 1.96 * se), "starts_used": n, "confidence": conf,
+            "assumed": config.house.conditioned_air_fraction,
+            "note": "Estimated from the change in the basement moisture trend at fan starts. It includes any error in "
+                    "the fan airflow estimate."}
+
+
+def effective_upstairs_fraction(config: AppConfig, learned: dict | None) -> tuple[float, str]:
+    """(fraction, source): the learned value once it is trustworthy, otherwise the configured assumption."""
+    h = config.house
+    if (h.learn_conditioned_air_fraction and learned and learned.get("fraction") is not None
+            and learned.get("confidence") in ("medium", "high")):
+        return float(learned["fraction"]), "learned"
+    return h.conditioned_air_fraction, "assumed"

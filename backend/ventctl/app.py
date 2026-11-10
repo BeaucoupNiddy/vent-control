@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, calibration, climate, reports, simulation, updater, weather
+from . import analysis, calibration, climate, reports, setup_guide, simulation, updater, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -126,6 +126,14 @@ class ZoneSimRequest(BaseModel):
     profile_id: str = "nola_front"
     strategies: list[str] | None = None
     exterior_strategy: str = "optimized"
+
+
+class SetupChange(BaseModel):
+    current_step: str | None = None
+    paused: bool | None = None
+    answers: dict | None = None
+    mark: dict | None = None  # {"step": id, "state": "done" | "skipped" | None}
+    finished: bool = False
 
 
 class CalcRequest(BaseModel):
@@ -580,6 +588,42 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     def sim_zone_strategies():
         from . import zonesim
         return [{"id": k, "name": v[0], "description": v[1]} for k, v in zonesim.CIRC_STRATEGIES.items()]
+
+    async def setup_state(probe: bool) -> dict:
+        c = ctrl()
+        ctx: dict = {}
+        if probe and c.config.sensors.provider != "mock":
+            try:
+                ctx["channels"] = await asyncio.wait_for(c.sensors.discover(), timeout=10)
+            except (HardwareError, asyncio.TimeoutError, OSError) as e:
+                ctx["discover_error"] = str(e) or type(e).__name__
+        if probe and c.config.switches.provider != "mock":
+            ids = {f.switch_id for f in c.config.fans if f.switch_id} | \
+                  {x.switch_id for x in c.config.circulators if x.switch_id}
+            probes = {}
+            for sid in sorted(ids):
+                try:
+                    st = await asyncio.wait_for(c.switches.get(sid), timeout=10)
+                    probes[sid] = {"reachable": st.reachable, "on": st.on, "error": st.error}
+                except Exception as e:  # noqa: BLE001 - shown to the person as a check result
+                    probes[sid] = {"reachable": False, "error": str(e) or type(e).__name__}
+            ctx["plug_probe"] = probes
+        return setup_guide.evaluate(c.config, c.status(), setup_guide.load_progress(c.storage), ctx)
+
+    @app.get("/api/setup")
+    async def get_setup(probe: bool = True):
+        """Walkthrough steps, check results and saved progress. probe=true also contacts the hardware."""
+        return await setup_state(probe)
+
+    @app.put("/api/setup/progress")
+    async def put_setup_progress(req: SetupChange):
+        setup_guide.update_progress(ctrl().storage, datetime.now(timezone.utc), req.model_dump(exclude_none=True))
+        return await setup_state(False)
+
+    @app.post("/api/setup/reset")
+    async def reset_setup():
+        ctrl().storage.set_kv(setup_guide.PROGRESS_KEY, setup_guide.empty_progress())
+        return await setup_state(False)
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):

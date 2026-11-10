@@ -204,6 +204,11 @@ class ControlSettings(BaseModel):
     rh_start_deadband_pct: float = Field(2, ge=0, le=10, description="Start only when RH exceeds target by this much")
     dewpoint_on_advantage_f: float = Field(3, ge=0, le=20)
     dewpoint_off_advantage_f: float = Field(1, ge=0, le=20)
+    dry_window_advantage_f: float = Field(
+        8, ge=0, le=40, description="Outdoor dew point at least this much lower = a strong drying window")
+    dry_window_stop_rh_pct: float = Field(
+        50, ge=30, le=80, description="During a strong drying window a running fan keeps going down to this RH "
+                                      "instead of stopping at the target, so the wood and concrete dry too")
     min_removal_g_per_h: float = Field(50, ge=0, description="Minimum estimated net vapor removal to run (Balanced)")
     min_on_minutes: float = Field(15, ge=0, le=240)
     min_off_minutes: float = Field(10, ge=0, le=240)
@@ -310,6 +315,15 @@ class HouseSettings(BaseModel):
     )
     upstairs_temp_f: float = Field(74, description="Assumed upstairs conditions when no upstairs sensor")
     upstairs_rh_pct: float = Field(50, ge=1, le=100)
+    learn_conditioned_air_fraction: bool = Field(
+        True, description="Estimate the upstairs share from fan starts (needs an upstairs T/RH sensor); the learned "
+                          "value replaces the assumed one once its confidence is medium or better")
+    heating_below_outdoor_f: float = Field(
+        55, ge=-20, le=80, description="Outdoor temperature below which the heating is assumed to run. Air drawn "
+                                       "from upstairs costs heating energy only below it")
+    cooling_above_outdoor_f: float = Field(
+        78, ge=50, le=110, description="Outdoor temperature above which the AC is assumed to run. Air drawn from "
+                                       "upstairs costs cooling energy only above it")
     cooling_cop: float = Field(3.0, gt=0.5, le=10)
     heating_cop: float = Field(1.0, gt=0.5, le=6, description="1.0 = resistance / gas-equivalent; 3 = heat pump")
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
@@ -317,9 +331,10 @@ class HouseSettings(BaseModel):
     basement_volume_ft3: float = Field(24000, gt=100, le=500000, description="Air volume of the basement")
     moisture_source_pints_day: float = Field(6, ge=0, le=500, description="Assumed internal moisture sources "
                                                                           "(damp slab, intrusion); used in predictions")
-    moisture_buffer_kg: float = Field(25, ge=0, le=5000, description="Assumed water the materials exchange between "
-                                                                    "0% and 100% RH (0 = off)")
-    moisture_buffer_tau_h: float = Field(12, gt=0.1, le=500)
+    moisture_buffer_kg: float = Field(400, ge=0, le=5000, description="Assumed water the materials (wood framing, "
+                                      "subfloor, concrete, contents) exchange between 0% and 100% RH (0 = off). The "
+                                      "air itself holds only ~10 kg; real buffers are usually far larger")
+    moisture_buffer_tau_h: float = Field(36, gt=0.1, le=500)
     elevation_ft: float = Field(0, ge=-500, le=15000, description="Sets standard pressure when no barometer is read")
     site_pressure_kpa: float | None = Field(None, ge=50, le=110, description="Fixed pressure override (blank = from "
                                                                             "barometer or elevation)")
@@ -501,3 +516,26 @@ def example_config() -> AppConfig:
             ]
         ),
     )
+
+
+# Defaults that changed after installs existed. A saved configuration that still holds the old
+# default is moved to the new one once; a value the user changed is left alone.
+DEFAULTS_VERSION = 1
+_DEFAULT_UPGRADES: list[tuple[int, str, str, float, float]] = [
+    # (version, section, field, old default, new default)
+    (1, "house", "moisture_buffer_kg", 25.0, 400.0),  # physics review: materials hold far more water than 25 kg
+    (1, "house", "moisture_buffer_tau_h", 12.0, 36.0),
+]
+
+
+def upgrade_defaults(config: AppConfig, from_version: int) -> list[str]:
+    """Apply default upgrades newer than from_version in place; returns a description of each change."""
+    changes = []
+    for v, section, name, old, new in _DEFAULT_UPGRADES:
+        if v <= from_version:
+            continue
+        obj = getattr(config, section)
+        if getattr(obj, name) == old:
+            setattr(obj, name, new)
+            changes.append(f"{section}.{name}: {old:g} -> {new:g}")
+    return changes

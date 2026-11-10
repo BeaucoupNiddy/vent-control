@@ -232,6 +232,63 @@ def summary(zs: dict[str, ZoneStatus], config: AppConfig) -> dict:
             "cooler_not_wetter": by_rh.id != by_w.id}
 
 
+AVERAGE_ID = "_basement_avg"  # tracker key for the whole-basement average (not a real zone)
+
+
+def basement_average(zs: dict[str, ZoneStatus], config: AppConfig, snapshot=None,
+                     tracker: ZoneTracker | None = None, now: datetime | None = None) -> dict | None:
+    """Whole-basement average air, for monitoring. Control still uses the worst zone.
+
+    Averages moisture content (humidity ratio) and temperature, weighted by each zone's
+    mass of dry air (volume x density), then derives RH and dew point from the result. That
+    is what you would measure if all the basement air were mixed together. Averaging RH
+    directly would be wrong: a cool zone shows a higher RH with the same water in the air.
+
+    Uses only basement T/RH sensors (outdoor, upstairs and concrete probes are not air in the
+    basement) and skips sensors in a side-by-side comparison. With no zones configured, every
+    basement sensor counts equally.
+    """
+    cs = config.circulation
+    parts: list[tuple[str, str, AirState, float]] = []  # (id, name, air, volume ft3)
+    for z in zs.values():
+        if z.ok:
+            parts.append((z.id, z.name, z.air, z.volume_ft3))
+    method = "volume_weighted"
+    if not parts and snapshot is not None:
+        good = [r for r in snapshot.by_role(SensorRole.BASEMENT) if r.ok]
+        for r in good:
+            a = r.air()
+            if a is not None:
+                parts.append((r.mapping.sensor_id, r.mapping.name, a, 1.0))
+        method = "equal"
+    if not parts:
+        if tracker is not None and now is not None:
+            tracker.update(now, AVERAGE_ID, None, cs)
+        return None
+    masses = [v * psychro.dry_air_density(a.t_c, a.w, a.p_kpa) for _, _, a, v in parts]
+    m = sum(masses)
+    t = sum(mi * a.t_c for mi, (_, _, a, _) in zip(masses, parts)) / m
+    w = sum(mi * a.w for mi, (_, _, a, _) in zip(masses, parts)) / m
+    air = AirState.from_t_w(t, w, parts[0][2].p_kpa)
+    expected = [z for z in zs.values() if z.status != "unconfigured"]
+    missing = [z.name for z in expected if not z.ok]
+    vol_all = sum(z.volume_ft3 for z in expected) or None
+    vol_used = sum(z.volume_ft3 for z in expected if z.ok)
+    rhs = [a.rh * 100 for _, _, a, _ in parts]
+    mins = tracker.update(now, AVERAGE_ID, air, cs) if tracker is not None and now is not None else {}
+    trend = tracker.trend(AVERAGE_ID, now) if tracker is not None and now is not None else {}
+    return {
+        "t_c": air.t_c, "rh_pct": air.rh * 100, "dew_point_c": air.dew_point_c,
+        "w_g_kg": air.w * 1000, "abs_humidity_g_m3": air.abs_humidity_g_m3,
+        "level": rh_level(air.rh * 100, cs), "trend": trend, "minutes_above": mins,
+        "method": method, "count": len(parts),
+        "included": [{"id": i, "name": n, "weight": mi / m} for (i, n, _, _), mi in zip(parts, masses)],
+        "missing": missing, "partial": bool(missing),
+        "volume_covered_pct": (vol_used / vol_all * 100) if (vol_all and method != "equal") else None,
+        "rh_min_pct": min(rhs), "rh_max_pct": max(rhs),
+    }
+
+
 # ---------------------------------------------------------------- sensor comparison
 def compare_sensors(samples: dict[str, list[tuple[float, float]]], rh_threshold_pct: float = 3.0,
                     dew_threshold_f: float = 1.5, reference: str | None = None) -> dict:

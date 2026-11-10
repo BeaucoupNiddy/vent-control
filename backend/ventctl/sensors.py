@@ -176,10 +176,12 @@ class Conditions:
     diff_pressure_pa: float | None
     zones: dict[str, dict] = field(default_factory=dict)
     surfaces: list[dict] = field(default_factory=list)  # valid surface probes {name, t_c, zone, local, exposure}
-    surface_follow: float = 0.5  # fraction of an air-temperature change the surface follows within the horizon
+    surface_follow: float = 0.2  # fraction of an air-temperature change the surface follows within the horizon
     pipe_c: float | None = None  # coldest pipe / vulnerable-spot sensor
     pipe_label: str | None = None
     pipe_sensors: int = 0  # configured pipe sensors (valid or not)
+    exhaust: AirState | None = None  # air at the exhaust fan (ventilation-path zones); None = use indoor
+    exhaust_label: str | None = None
     forecast: list | None = None  # [(datetime, AirState)] outdoor forecast, optional
     forecast_age_h: float | None = None
 
@@ -188,7 +190,8 @@ def aggregate_zones(airs: list[AirState], method: str) -> AirState:
     if len(airs) == 1:
         return airs[0]
     if method == "wettest":
-        return max(airs, key=lambda a: a.rh)
+        # by moisture content: a cooler zone shows a higher RH with the same water in the air
+        return max(airs, key=lambda a: a.w)
     # mean: average temperature and humidity ratio (moisture content), then derive RH
     t = sum(a.t_c for a in airs) / len(airs)
     w = sum(a.w for a in airs) / len(airs)
@@ -224,6 +227,17 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
         if bad:
             label += f" ({len(bad)} zone sensor(s) unavailable)"
 
+    # The exhaust fan removes the air around it, not the wettest zone's air: direction and
+    # removal are judged on the ventilation-path zones, urgency on the aggregate above.
+    exhaust, exhaust_label = None, None
+    path = {z.id for z in config.zones if z.on_ventilation_path}
+    if indoor is not None and not group.zone and path and len(path) < len(config.zones):
+        pa = [a for r, a in good if r.mapping.zone in path]
+        if pa:
+            exhaust = AirState.from_t_w(sum(a.t_c for a in pa) / len(pa), sum(a.w for a in pa) / len(pa),
+                                        pa[0].p_kpa)
+            exhaust_label = ", ".join(sorted({r.mapping.zone for r, _ in good if r.mapping.zone in path}))
+
     outdoor_rs = snapshot.by_role(SensorRole.OUTDOOR)
     outdoor = next((r.air() for r in outdoor_rs if r.ok), None)
     outdoor_problem = None
@@ -253,7 +267,7 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
         indoor=indoor, indoor_label=label, indoor_problem=indoor_problem,
         outdoor=outdoor, outdoor_problem=outdoor_problem,
         surface_c=surface_c, surface_source=surface_source, surface_label=surface_label,
-        upstairs=up, diff_pressure_pa=dp, zones=zones,
+        upstairs=up, diff_pressure_pa=dp, zones=zones, exhaust=exhaust, exhaust_label=exhaust_label,
         surfaces=[_surface_entry(r, snapshot, config) for r in surf],
         pipe_c=pipe.temp_c if pipe else None, pipe_label=pipe.mapping.name if pipe else None,
         pipe_sensors=len(pipes_all),

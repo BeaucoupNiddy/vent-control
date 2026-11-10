@@ -130,11 +130,13 @@ class Controller:
     zone_tracker: zones_mod.ZoneTracker = field(default_factory=zones_mod.ZoneTracker)
     surface_tracker: surf_mod.SurfaceTracker = field(default_factory=surf_mod.SurfaceTracker)
     zone_status: dict = field(default_factory=dict)
+    basement_avg: dict | None = None  # whole-basement average air (monitoring only)
     surface_status: list = field(default_factory=list)
     circ_states: dict = field(default_factory=dict)  # real plug state per circulator
     circ_shadow: dict = field(default_factory=dict)  # hypothetical state while not commanding
     circ_decisions: dict = field(default_factory=dict)
     surface_learned: dict | None = None
+    airflow_learned: dict | None = None  # learned upstairs share of the makeup air
     comparison: dict | None = None
     _cmp_samples: list = field(default_factory=list)
     _circ_cycle: dict = field(default_factory=dict)
@@ -165,6 +167,8 @@ class Controller:
             self.thermal_learned = self.storage.get_kv("thermal_model")
         if self.surface_learned is None:
             self.surface_learned = self.storage.get_kv("surface_model")
+        if self.airflow_learned is None:
+            self.airflow_learned = self.storage.get_kv("airflow_model")
         if self.comparison is None:
             self.comparison = self.storage.get_kv("sensor_comparison")
             self._cmp_samples = list((self.storage.get_kv("sensor_comparison_samples") or [])[-3000:])
@@ -239,6 +243,7 @@ class Controller:
 
         local = now.astimezone(ZoneInfo(cfg.system.timezone))
         local_hour = local.hour + local.minute / 60
+        dcfg = self.decision_config()
         for g in cfg.groups:
             gs = self.groups.setdefault(g.id, GroupState())
             if cfg.mode != Mode.SIMULATION:
@@ -247,7 +252,7 @@ class Controller:
             cond.forecast, cond.forecast_age_h = fc, fc_age
             cond.surface_follow = air_follow
             was_on = gs.is_on
-            d = decide(cond, gs, cfg, g, now, local_hour=local_hour, thermal_params=tp)
+            d = decide(cond, gs, dcfg, g, now, local_hour=local_hour, thermal_params=tp)
             _track_deferral(gs, d, now)
             prev = self.decisions.get(g.id)
             self.decisions[g.id] = d
@@ -285,6 +290,7 @@ class Controller:
         coloc = set(self.comparison["sensor_ids"]) if self.comparison else set()
         zs = zones_mod.zone_statuses(snap, cfg, self.zone_tracker, now, coloc)
         self.zone_status = zs
+        self.basement_avg = zones_mod.basement_average(zs, cfg, snap, self.zone_tracker, now)
         ss = surf_mod.surface_statuses(snap, cfg, zs, self.surface_tracker, now, fallback=allc.indoor,
                                        outdoor=allc.outdoor, forecast=fc)
         d0 = self.decisions.get(cfg.groups[0].id) if cfg.groups else None
@@ -576,7 +582,8 @@ class Controller:
             sgs = self.shadow_groups[g.id] = GroupState(is_on=gs.is_on, verified=gs.verified,
                                                         last_change=gs.last_change)
         sgs.verified = gs.verified
-        sd = decide(cond, sgs, cfg, g, now, mode=Mode.SIMULATION, local_hour=local_hour, policy=other,
+        sd = decide(cond, sgs, self.decision_config(), g, now, mode=Mode.SIMULATION, local_hour=local_hour,
+                    policy=other,
                     thermal_params=tp)
         _track_deferral(sgs, sd, now)
         if sd.target_on != sgs.is_on:
@@ -674,11 +681,30 @@ class Controller:
         learned["history"] = hist
         self.thermal_learned = learned
         self.storage.set_kv("thermal_model", learned)
+        afit = calibration.fit_upstairs_fraction(rows, cfg)
+        afit["fitted_at"] = now.isoformat()
+        prev_src = calibration.effective_upstairs_fraction(cfg, self.airflow_learned)[1]
+        self.airflow_learned = afit
+        self.storage.set_kv("airflow_model", afit)
+        if prev_src != "learned" and calibration.effective_upstairs_fraction(cfg, afit)[1] == "learned":
+            self.storage.add_event(now, "config", "info",
+                                   f"Learned that about {afit['fraction'] * 100:.0f}% of the fan's makeup air comes "
+                                   f"from upstairs (was assumed {cfg.house.conditioned_air_fraction * 100:.0f}%), "
+                                   f"from {afit['starts_used']} fan starts. Energy estimates now use it.",
+                                   "UPSTAIRS_FRACTION_LEARNED", afit)
         sfit = surf_mod.fit_air_follow(rows)
         sfit["fitted_at"] = now.isoformat()
         self.surface_learned = sfit
         self.storage.set_kv("surface_model", sfit)
         return fit
+
+    def decision_config(self) -> AppConfig:
+        """The configuration the engine decides with: the learned upstairs share replaces the assumed one."""
+        cfg = self.config
+        f, src = calibration.effective_upstairs_fraction(cfg, self.airflow_learned)
+        if src != "learned" or f == cfg.house.conditioned_air_fraction:
+            return cfg
+        return cfg.model_copy(update={"house": cfg.house.model_copy(update={"conditioned_air_fraction": f})})
 
     def refit_thermal(self) -> dict:
         return self._maybe_refit(self.clock.now(), force=True) or {}
@@ -1019,6 +1045,7 @@ class Controller:
         ind = allc.indoor.to_dict() if allc.indoor else None
         out = allc.outdoor.to_dict() if allc.outdoor else None
         sim = cfg.mode == Mode.SIMULATION
+        ba = self.basement_avg
         on_count = 0
         power = 0.0
         all_verified = True
@@ -1102,6 +1129,11 @@ class Controller:
             "opportunity": first.opportunity if first else None,
             "pipe_t_c": allc.pipe_c,
             "circ": circ, "surfaces": surfaces,
+            "avg_t_c": ba["t_c"] if ba else None, "avg_rh": ba["rh_pct"] if ba else None,
+            "avg_td_c": ba["dew_point_c"] if ba else None, "avg_w": ba["w_g_kg"] / 1000 if ba else None,
+            "upstairs_t_c": allc.upstairs.t_c if allc.upstairs else None,
+            "upstairs_w": allc.upstairs.w if allc.upstairs else None,
+            "exhaust_w": (allc.exhaust or allc.indoor).w if allc.indoor else None,
         })
 
     # ------------------------------------------------------------ status
@@ -1155,7 +1187,12 @@ class Controller:
             },
             "zones": {k: z.to_dict() for k, z in self.zone_status.items()},
             "zone_summary": zones_mod.summary(self.zone_status, self.config) if self.zone_status else None,
+            "basement_average": self.basement_avg,
             "surfaces": [x.to_dict() for x in self.surface_status],
+            "airflow_model": {"upstairs_fraction": calibration.effective_upstairs_fraction(self.config,
+                                                                                          self.airflow_learned)[0],
+                              "source": calibration.effective_upstairs_fraction(self.config, self.airflow_learned)[1],
+                              "learned": self.airflow_learned},
             "surface_model": {"air_follow_fraction": surf_mod.air_follow_fraction(self.config, self.surface_learned)[0],
                               "source": surf_mod.air_follow_fraction(self.config, self.surface_learned)[1],
                               "learned": self.surface_learned},

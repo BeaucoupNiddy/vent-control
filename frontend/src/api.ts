@@ -69,6 +69,9 @@ export const api = {
   simZoneStrategies: () => req("GET", "/api/sim/zones/strategies"),
   updateInfo: () => req("GET", "/api/update"),
   updateNow: () => req("POST", "/api/update"),
+  setup: (probe = true) => req("GET", `/api/setup?probe=${probe}`),
+  setupProgress: (body: Json) => req("PUT", "/api/setup/progress", body),
+  setupReset: () => req("POST", "/api/setup/reset"),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),
