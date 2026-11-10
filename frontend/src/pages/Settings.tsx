@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card } from "../components";
 import { ZoneSettings } from "./SettingsZones";
+import { UpdateCard } from "./SettingsUpdate";
 
 function get(o: Json, path: string) {
   return path.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
@@ -213,6 +214,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
         <p className="note">All values are validated before saving. Defaults are starting points, not universally optimal settings.
           The controller never changes safety limits on its own.</p>
       </Card>
+      <UpdateCard />
       <Hardware cfg={cfg} change={change} />
       <Groups cfg={cfg} change={change} />
       <ZoneSettings cfg={cfg} change={change} />
