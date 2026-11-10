@@ -33,6 +33,9 @@ if [ "$OLD" = "$NEW" ] && [ "${1:-}" != "--force" ]; then
 fi
 
 log "updating ${OLD:0:7} -> ${NEW:0:7}"
+# The frontend build rewrites this file. Older versions tracked it in git, so a local build
+# left it "changed" and blocked every later update. Discard it; the build recreates it.
+git checkout -q -- frontend/tsconfig.tsbuildinfo 2>/dev/null || true
 if ! git merge -q --ff-only origin/main 2>>"$LOG"; then
   log "local changes block the update (git status shows them); nothing changed"
   exit 1
