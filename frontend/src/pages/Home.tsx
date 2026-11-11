@@ -184,7 +184,13 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const g = status.groups?.[0];
   const d = g?.decision;
   const m = d?.metrics || {};
-  const ind = m.indoor, out = m.outdoor;
+  // The decision carries no air readings when it stops early (for example with no outdoor
+  // sensor), so fall back to the measured basement average to keep the basement side filled in.
+  const ba = status.basement_average;
+  const ind = m.indoor ?? (ba?.t_c != null
+    ? { ...ba, dew_point_f: ba.dew_point_c != null ? ba.dew_point_c * 9 / 5 + 32 : null }
+    : undefined);
+  const out = m.outdoor;
   const anyOn = (status.groups || []).some((x: Json) => x.is_on);
   const rh: number | null = ind?.rh_pct ?? null;
   const tone = rhTone(rh, targets);
