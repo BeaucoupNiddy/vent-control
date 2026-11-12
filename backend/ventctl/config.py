@@ -188,7 +188,7 @@ class SurfaceSettings(BaseModel):
     monitor_margin_f: float = Field(5, ge=0, le=30, description="Below this margin: monitor (advisory)")
     elevated_margin_f: float = Field(3, ge=0, le=30, description="Below this margin: elevated risk (warning)")
     possible_margin_f: float = Field(0, ge=-10, le=10, description="At or below: condensation possible (high risk)")
-    probe_uncertainty_f: float = Field(1.0, ge=0, le=5, description="Probe accuracy (Ecowitt WN30: up to ±2°F; lower "
+    probe_uncertainty_f: float = Field(2.0, ge=0, le=5, description="Probe accuracy (Ecowitt WN30 spec: ±2°F; lower "
                                                                     "after checking against a reference)")
     dew_point_uncertainty_f: float = Field(1.0, ge=0, le=5, description="Local air dew-point accuracy")
     hysteresis_f: float = Field(0.5, ge=0, le=5)
@@ -215,7 +215,15 @@ class ControlSettings(BaseModel):
     min_removal_g_per_h: float = Field(50, ge=0, description="Minimum estimated net vapor removal to run (Balanced)")
     min_on_minutes: float = Field(15, ge=0, le=240)
     min_off_minutes: float = Field(10, ge=0, le=240)
-    surface_margin_f: float = Field(3, ge=0, le=20)
+    surface_margin_f: float = Field(3, ge=0, le=20, description="Condensation margin required on top of the probe "
+                                                                "and dew-point uncertainty (measured surfaces)")
+    surface_target_rh_pct: float = Field(
+        70, ge=50, le=95, description="Surface humidity target: run when the estimated RH right at a measured cold "
+                                      "surface (slab, wall) stays above this, even if room air is below its target. "
+                                      "Uses the conservative (colder) surface reading. Room targets still apply.")
+    surface_rh_deadband_pct: float = Field(3, ge=0, le=15, description="Start only when surface RH exceeds the "
+                                                                       "surface target by this much")
+    surface_demand_enabled: bool = Field(True, description="Measured surfaces can create drying demand")
     surface_temp_estimate_f: float | None = Field(
         None, description="Conservative minimum surface temperature if no surface sensor (user-approved)"
     )
@@ -327,6 +335,9 @@ class HouseSettings(BaseModel):
     cooling_above_outdoor_f: float = Field(
         78, ge=50, le=110, description="Outdoor temperature above which the AC is assumed to run. Air drawn from "
                                        "upstairs costs cooling energy only above it")
+    mild_weather_latent_penalty: bool = Field(
+        True, description="Between the heating and cooling temperatures, still charge the AC energy needed to take "
+                          "out the extra water when replacement air is more humid than upstairs (muggy mild days)")
     cooling_cop: float = Field(3.0, gt=0.5, le=10)
     heating_cop: float = Field(1.0, gt=0.5, le=6, description="1.0 = resistance / gas-equivalent; 3 = heat pump")
     electricity_cost_per_kwh: float = Field(0.13, ge=0)
@@ -523,11 +534,12 @@ def example_config() -> AppConfig:
 
 # Defaults that changed after installs existed. A saved configuration that still holds the old
 # default is moved to the new one once; a value the user changed is left alone.
-DEFAULTS_VERSION = 1
+DEFAULTS_VERSION = 2
 _DEFAULT_UPGRADES: list[tuple[int, str, str, float, float]] = [
     # (version, section, field, old default, new default)
     (1, "house", "moisture_buffer_kg", 25.0, 400.0),  # physics review: materials hold far more water than 25 kg
     (1, "house", "moisture_buffer_tau_h", 12.0, 36.0),
+    (2, "surfaces", "probe_uncertainty_f", 1.0, 2.0),  # Ecowitt WN30 manual: ±2°F
 ]
 
 

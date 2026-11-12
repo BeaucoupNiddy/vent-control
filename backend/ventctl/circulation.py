@@ -249,17 +249,19 @@ def decide_circulator(
                                 f"Mixing would lower the conservative margin at {s.name} from {m_off:.1f}°F to "
                                 f"{m_on:.1f}°F"))
         reasons.append("CIRCULATION_WORSENS_SURFACE_RISK")
+        # a safety stop: it overrides the minimum run time
         return out(False, "CIRCULATION_WORSENS_SURFACE_RISK",
-                   f"OFF: moving air through this connection would carry higher-dew-point air toward {s.name} "
+                   f"OFF now: moving air through this connection would carry higher-dew-point air toward {s.name} "
                    f"(predicted conservative margin {m_on:.1f}°F vs {m_off:.1f}°F with the fan off).",
-                   "adverse", preds=preds)
+                   "adverse", preds=preds, safety=True)
     if unknown_surface:
         s = unknown_surface[0]
         checks.append(CircCheck("surface", "Surface condensation", None,
                                 f"{s.name} is at {s.risk} risk and a zone sensor is unavailable"))
+        # missing data at a surface already at risk: stop now rather than keep stirring blind
         return out(False, "SURFACE_RISK_EFFECT_UNKNOWN",
-                   f"OFF: {s.name} is at elevated condensation risk and a zone reading is missing, so the effect of "
-                   "circulation cannot be judged. Warning only.", "uncertain", preds=preds)
+                   f"OFF now: {s.name} is at elevated condensation risk and a zone reading is missing, so the effect "
+                   "of circulation cannot be judged.", "uncertain", preds=preds, safety=True)
     checks.append(CircCheck("surface", "Surface condensation", True if preds else None,
                             "No monitored surface would be pushed toward condensation" if preds else
                             "Not evaluated"))
@@ -335,12 +337,29 @@ def decide_circulator(
     # 6. exterior-ventilation support
     ext_on = bool(exterior.get("on"))
     if cs.run_with_exhaust:
-        if exterior.get("auto_on"):
-            state.post_vent_until = now + timedelta(minutes=cs.post_ventilation_min)
-            reasons.append("RUN_WITH_EXHAUST")
-            return out(True, "RUN_WITH_EXHAUST",
-                       "ON: the exhaust fans are bringing in drier outside air, so this fan stirs the basement to "
-                       "dry damp corners and surfaces into the air being exhausted.", "beneficial", preds=preds)
+        # Only alongside a real Automatic drying run (not a schedule, which can run while adding moisture),
+        # only for fans marked to support ventilation, and only where both ends of the fan's connection have
+        # a working sensor: an unobserved path is not a demonstrated benefit.
+        if exterior.get("auto_on") and exterior.get("drying"):
+            missing = sorted({z for k in conns for z in (k.zone_a, k.zone_b)
+                              if not (zones.get(z) and zones[z].ok)})
+            if not circ.ventilation_support:
+                checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
+                                        "This fan is not marked to support ventilation"))
+            elif not conns:
+                checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
+                                        "Not assigned to a zone connection"))
+            elif missing:
+                reasons.append("RUN_WITH_EXHAUST_NO_DATA")
+                checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
+                                        f"No working sensor in {', '.join(missing)}, so the benefit cannot be seen"))
+            else:
+                state.post_vent_until = now + timedelta(minutes=cs.post_ventilation_min)
+                reasons.append("RUN_WITH_EXHAUST")
+                return out(True, "RUN_WITH_EXHAUST",
+                           "ON: the exhaust fans are bringing in drier outside air, so this fan stirs the basement "
+                           "to dry damp corners and surfaces into the air being exhausted.", "beneficial",
+                           preds=preds)
         if state.post_vent_until and now < state.post_vent_until and state.last_reason in (
                 "RUN_WITH_EXHAUST", "POST_EXHAUST_RUN"):
             return out(True, "POST_EXHAUST_RUN",

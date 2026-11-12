@@ -67,7 +67,7 @@ def test_sensor_and_plug_checks():
     assert ch["outdoor"]["status"] == "ok"
     assert ch["zone-main"]["status"] == "fail"  # stale reading
     assert ch["zone-pocket"]["status"] == "fail"  # no sensor
-    assert ch["probe"]["status"] == "fail"  # no concrete probe and no estimate
+    assert ch["probe"]["status"] == "warn"  # no probe: Automatic still runs, but skips cold outdoor air
     assert "ecowitt:ch2" in ch["unmapped"]["label"]
     _, ch = checks(r, "plugs")
     assert ch["creds"]["status"] == "ok"  # no TP-Link account needed for Matter-only plugs
@@ -95,3 +95,41 @@ def test_tapo_email_without_password_fails():
     r = setup_guide.evaluate(cfg, {"sensors": [], "hardware": {}, "alerts": []}, setup_guide.empty_progress(), {})
     _, ch = checks(r, "plugs")
     assert ch["creds"]["status"] == "fail"
+
+
+def test_verify_step_checks():
+    from ventctl.config import SensorMapping, SensorRole, example_config
+    cfg = example_config()
+    cfg.sensors.mappings = [SensorMapping(sensor_id="a", name="Hub", role=SensorRole.BASEMENT, zone="main"),
+                            SensorMapping(sensor_id="b", name="Fan room", role=SensorRole.BASEMENT, zone="main"),
+                            SensorMapping(sensor_id="o", name="Out", role=SensorRole.OUTDOOR)]
+    ch = {c["id"]: c for c in setup_guide.check_verify(cfg, {}, {}, {})}
+    assert ch["sensors_compared"]["status"] == "todo"
+    assert ch["nosensor-damp"]["status"] == "warn" and ch["probe"]["status"] == "warn"
+    assert ch["upstairs"]["status"] == "warn"
+    zones = {c["id"]: c for c in setup_guide.check_zones(cfg, {}, {}, {})}
+    assert zones["shared-main"]["status"] == "warn"
+    ch = {c["id"]: c for c in setup_guide.check_verify(cfg, {}, {"sensors_compared": True}, {})}
+    assert ch["compare"]["status"] == "ok"
+    ch = {c["id"]: c for c in setup_guide.check_verify(cfg, {}, {}, {"comparison": {"active": True, "hours": 3}})}
+    assert ch["compare"]["status"] == "warn"
+
+
+def test_comparison_with_outdoor_sensor_pauses_automatic():
+    from ventctl.config import SensorRole
+    from ventctl.sensors import Conditions
+    from .helpers import air_f
+
+    class Fake:
+        pass
+    from ventctl.controller import Controller
+    from ventctl.config import example_config
+    f = Fake()
+    f.config = example_config()
+    out = next(m for m in f.config.sensors.mappings if m.role == SensorRole.OUTDOOR)
+    f.comparison = {"sensor_ids": [out.sensor_id, "x"]}
+    c = Conditions(indoor=air_f(72, 60), indoor_label="", indoor_problem=None, outdoor=air_f(70, 40),
+                   outdoor_problem=None, surface_c=None, surface_source=None, surface_label=None, upstairs=None,
+                   diff_pressure_pa=None)
+    Controller._pause_for_comparison(f, c)
+    assert c.outdoor is None and "comparison" in c.outdoor_problem

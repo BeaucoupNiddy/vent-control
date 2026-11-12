@@ -97,6 +97,11 @@ This measures the wall's surface temperature so the app can tell how close the w
 4. Cover the tip with a small square of foam board (2-3 in) and tape round it, so the probe reads the wall and not the air.
 5. Mount the transmitter box higher up on the wall or a post, cable loose, away from where water could collect.
 6. Insert batteries and check it appears in the Ecowitt app. It shows a temperature only (no humidity).
+7. In the app, give the probe the **zone whose air sensor is nearest**, so the app compares the wall with the air right next to it.
+
+Why it matters: a wall a few degrees colder than the room is much damper at its surface than the room air suggests. At 71°F and 55% in the room, a 66°F slab sits around 65% at its surface, and a 61°F slab around 78%. With a probe, the app also runs the fans when the coldest surface stays above the **slab and wall humidity target** (70% by default), even if the room air is below its own target. The room targets still apply.
+
+The WN30 is rated ±2°F, and the app reads it on the cold side of that. If you hold a good thermometer on the same spot and they agree within 1°F, set **Probe uncertainty** to 1°F in Settings. One probe sees one spot: also check the coldest wood (sill plate, joist ends) with a pin moisture meter now and then. A temperature probe can't see water coming up through the concrete.
 
 ### 4.5 Tjernlund V2D exterior fan
 
@@ -170,11 +175,20 @@ Tips for the trickier steps:
 - **Gas appliances.** An exhaust fan lowers the basement's air pressure. A water heater or furnace that vents up a chimney or metal flue can then spill fumes into the basement ("backdraft"). If you have one, the app blocks the exhaust fan until a technician does a backdraft test with the fan running. Sealed appliances that vent through plastic pipes straight outside are fine.
 - **Your TP-Link password** is stored only in the controller's database on your Mac and is used only to set up the local connection to the plugs.
 
-## 6. The first weeks
+## 6. The first weeks: prove it's working
 
-- **Day 1**: check the Home page now and then. The fan should run only when the outdoor sensor shows drier air (lower dew point) than the basement.
-- **Week 1**: on **Diagnostics**, run a **side-by-side comparison**: put all the T/RH sensors together on a shelf for a few hours and let the app work out small calibration offsets. Then put them back.
-- **Weeks 1-2**: circulation fans stay in **Shadow**. On the **Dashboard**, the circulation section shows what the app would have done. If it looks sensible, set circulation to **Automatic** in Settings (only commissioned fans are switched).
+Automatic starts out running on assumptions: how much air the fans really move, how much of it comes down from the house, and whether the sensors agree. The **Prove it's working** step in the Setup tab walks through these. None of it is urgent; spread it over the first few weeks.
+
+- **Day 1**: check the Home page now and then. The fans should run only when the outdoor sensor shows drier air (lower dew point) than the basement.
+- **Compare sensors side by side (week 1).** Rooms really can differ, so never adjust a sensor just because it disagrees with another room. Put every T/RH sensor together (the outdoor one too) on a shelf away from drafts, start the comparison on the **Diagnostics** tab, and leave them **24 to 48 hours**. While the outdoor sensor is inside, Automatic keeps the exhaust fans off, because it isn't measuring outdoor air. Apply offsets only for sensors that still disagree side by side, then put each sensor back.
+- **One zone per room.** If two sensors share a zone but sit in different rooms, give each room its own zone so a damp room can't hide in an average. The app now decides by the most humid room that outdoor air can still dry, and judges the water removed on the air the exhaust fans pull out.
+- **A sensor in the damp-prone area.** That's where it matters most. Without one, the app can't tell if the area is drying, and circulation fans won't run toward it.
+- **Check the airflow path.** With the exhaust running, make sure the passive vents opposite the fans are open, then hold an incense stick or a strip of tissue at each doorway between rooms. Air should drift toward the fans. A room with no draft isn't being ventilated.
+- **Measure what you can.** A plug-in watt meter shows each fan's real power. Airflow is optional (a cheap anemometer across the outside vent). Try one fan against two once: two fans rarely move twice the air through the far rooms.
+- **Add an upstairs sensor.** The exhaust pulls some air down from the house. An upstairs T/RH sensor lets the app measure that share instead of assuming 10%, and price the air-conditioning cost of replacing it. On mild, muggy days the app now counts the AC energy needed to dry that replacement air.
+- **Circulation fans (weeks 1-2).** They stay in **Shadow** at first; the Dashboard shows what the app would have done. They run alongside a drying exhaust run only if marked **support ventilation**, and only when both rooms they connect have a working sensor. They stop at once if mixing would push damper air toward a cold surface. Before switching circulation to **Automatic**, check on History that the far room's dew point actually drops while a fan runs: a fan spinning in a room is not proof that air is exchanged through it. Keep periodic mixing off.
+- **Control logic.** Keep the **moisture** logic in control and the temperature-aware one (TAMO) in shadow until real fan cycles back up its predictions.
+- **Plan for muggy months.** When outdoor air is wetter than the basement, the fans can't help, and a dehumidifier set to about 50% on its own humidistat is the only thing that removes water. Fix leaks, gutters and grading first: no fan keeps up with liquid water. The app can watch a dehumidifier's power plug but does not switch it.
 - **Monthly**: check sensor batteries (the app warns when one is low) and that the probe is still taped flat with its foam cover.
 
 ## 7. Troubleshooting
@@ -187,6 +201,8 @@ Tips for the trickier steps:
 | Fan doesn't start on test | Wait a full minute; check the plug turns on with its own button; for the HT-900 check its own switch is on. |
 | Fan blinks off for a second every ~15 minutes | Expected: the app re-arms the plug's safety timer while the fan should keep running. |
 | Automatic never runs the fan | Usually the outdoor air is wetter than the basement (common in New Orleans summers), or a safety block is active. The Home page and Dashboard say why. |
+| Fans skip cool, dry nights | Without a concrete probe the app can't check the walls, so it skips outdoor air colder than the basement's dew point plus the safety margin. Installing the WN30BL probe lets it use those nights. |
+| Fans off during a sensor comparison | Expected while the outdoor sensor is indoors for the side-by-side comparison. Stop the comparison on Diagnostics and put the sensor back outside. |
 | Want to start setup again | Setup tab → each step stays editable. Developers can reset progress with `POST /api/setup/reset`. |
 
 ---

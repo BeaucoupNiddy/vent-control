@@ -45,7 +45,7 @@ def test_79f_95pct_vs_74f_dewpoint_has_positive_drying():
 
 # 4
 def test_79f_70pct_vs_74f_dewpoint_is_moisture_addition():
-    d = run(cond(air_f(79, 70), air_f(84, td_f=74), surface_f=78))
+    d = run(cond(air_f(79, 70), air_f(84, td_f=74), surface_f=84))
     assert d.effect.net_removal_g_h < 0
     assert not d.target_on and d.reason_code == "OUTDOOR_WETTER"
 

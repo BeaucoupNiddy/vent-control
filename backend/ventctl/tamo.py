@@ -165,13 +165,17 @@ class TamoResult:
 
 def evaluate(indoor: AirState, outdoor: AirState, effect: VentilationEffect, look: Outlook, config: AppConfig,
              is_on: bool, surface_c: float | None, energy_value_g_kwh: float, want_on: bool = True,
-             surfaces: list[dict] | None = None, air_follow: float = 0.2) -> TamoResult:
+             surfaces: list[dict] | None = None, air_follow: float = 0.2,
+             demand_rh_pct: float | None = None) -> TamoResult:
+    """demand_rh_pct: the RH that sets urgency (the most humid room ventilation can dry, or a measured surface on
+    the room scale; see engine.humidity_demand). Defaults to the indoor air's RH."""
     t = config.temperature
     h = t.horizon_min
     hrs = h / 60
     i_on, i_off = look.on.at(h), look.off.at(h)
     rh_pct = indoor.rh * 100
-    u = urgency(rh_pct, t.urgency_low_rh_pct, t.urgency_high_rh_pct) if t.urgency_enabled else 1.0
+    u_rh = demand_rh_pct if demand_rh_pct is not None else rh_pct
+    u = urgency(u_rh, t.urgency_low_rh_pct, t.urgency_high_rh_pct) if t.urgency_enabled else 1.0
     m_da = coupled.dry_air_mass(look.model, look.state0)
 
     # predicted outcomes of each action

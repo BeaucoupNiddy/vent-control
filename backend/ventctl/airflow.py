@@ -6,8 +6,10 @@ Flow paths (volumetric flows at the fan):
   * if Qe > Qi the shortfall (Qe - Qi) is made up through passive vents and
     leaks. An assumed fraction f of that shortfall comes from the conditioned
     upstairs (through the floor); the rest comes from outdoors.
-  * the upstairs air costs HVAC energy only while the heating or AC is running
-    (judged from outdoor temperature, see HouseSettings)
+  * the upstairs air costs HVAC energy while the heating or AC is running
+    (judged from outdoor temperature, see HouseSettings), and on mild days the AC
+    energy to take out the extra water when the replacement air is more humid
+    than upstairs (latent load; the AC runs to keep the house dry, not only cool)
   * if Qi > Qe the basement is pressurized and the excess pushes basement air
     into the house / out through leaks. Flagged as a warning.
 
@@ -39,7 +41,7 @@ class VentilationEffect:
     net_removal_g_h: float
     net_removal_gal_day: float
     net_removal_gal_h: float
-    fan_power_w: float
+    fan_power_w: float  # exterior fans plus any circulators that run with them (aux_w)
     conditioned_air_penalty_w: float  # extra HVAC electricity to replace lost conditioned air
     total_power_w: float
     efficiency_g_per_kwh: float | None  # net removal per kWh (fan + HVAC penalty); None if no power
@@ -72,7 +74,13 @@ def hvac_penalty_w(m_up: float, outdoor: AirState, upstairs: AirState, house: Ho
         return m_up * dh * 1000 / house.cooling_cop if dh > 0 else 0.0
     if mode == "heating" and outdoor.t_c < upstairs.t_c:
         return m_up * psychro.CP_DA * (upstairs.t_c - outdoor.t_c) * 1000 / house.heating_cop
+    if mode is None and house.mild_weather_latent_penalty and outdoor.w > upstairs.w:
+        # muggy mild day: the house still has to be kept dry, so the extra water costs AC energy
+        return m_up * (outdoor.w - upstairs.w) * LATENT_KJ_KG * 1000 / house.cooling_cop
     return 0.0
+
+
+LATENT_KJ_KG = 2450.0  # heat of condensation of water near room temperature
 
 
 def ventilation_effect(
@@ -81,7 +89,9 @@ def ventilation_effect(
     fans: list[Fan],
     house: HouseSettings,
     upstairs: AirState | None = None,
+    aux_w: float = 0.0,
 ) -> VentilationEffect:
+    """aux_w: other equipment that runs only because these fans run (circulators set to run with the exhaust)."""
     upstairs_assumed = upstairs is None
     if upstairs is None:
         from .units import f_to_c
@@ -90,7 +100,7 @@ def ventilation_effect(
 
     qe = sum(f.actual_cfm for f in fans if f.type == FanType.EXHAUST)
     qi = sum(f.actual_cfm for f in fans if f.type == FanType.INTAKE)
-    fan_w = sum(f.rated_w for f in fans)
+    fan_w = sum(f.rated_w for f in fans) + (aux_w if fans else 0.0)
     f_up = house.conditioned_air_fraction
 
     if qe >= qi:
@@ -115,8 +125,7 @@ def ventilation_effect(
     net = rem_out + rem_up
 
     # Air pulled from upstairs is replaced upstairs by outdoor infiltration. That costs energy
-    # only while the HVAC is running: on mild days with heat and AC off the house floats and the
-    # replacement air is free.
+    # while the HVAC is heating or cooling, and on mild days for the extra water in muggy air.
     penalty_w = hvac_penalty_w(m_up, outdoor, upstairs, house)
 
     total_w = fan_w + penalty_w

@@ -26,12 +26,14 @@ policy) so the dashboard and shadow comparison always show it.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
 from . import tamo, thermal
 from .airflow import VentilationEffect, ventilation_effect
 from .config import AppConfig, ControlPolicy, EnergyProfile, Fan, FanGroup, FanType, Mode
+from . import psychro
 from .psychro import AirState
 from .sensors import Conditions
 from .units import c_to_f, delta_c_to_f, delta_f_to_c, f_to_c
@@ -116,6 +118,75 @@ def group_fans(config: AppConfig, group: FanGroup) -> list[Fan]:
     return [f for f in config.fans if f.group == group.id and f.enabled]
 
 
+def circulator_aux_w(config: AppConfig) -> float:
+    """Power of circulators that automatically run whenever the exhaust is drying (their cost belongs to the run)."""
+    cs = config.circulation
+    if cs.mode != "auto" or not cs.run_with_exhaust:
+        return 0.0
+    return sum(c.rated_w for c in config.circulators
+               if c.enabled and c.auto_enabled and c.commissioned and c.ventilation_support and c.switch_id)
+
+
+@dataclass
+class HumidityDemand:
+    """Why drying is (or is not) needed, judged room by room and at measured cold surfaces.
+
+    Removal and direction are judged on the air the exhaust actually removes; demand is judged
+    where the risk is: the room with the highest RH that ventilation can still dry (its air holds
+    more water than the outdoor air), and the conservative RH right at each measured surface.
+    """
+
+    room_rh_pct: float | None
+    room_label: str
+    surface_rh_pct: float | None = None  # conservative estimate (probe uncertainty toward colder)
+    surface_label: str | None = None
+    skipped_rooms: list[str] = field(default_factory=list)  # humid rooms ventilation cannot dry right now
+
+    def equivalent_rh_pct(self, config: AppConfig) -> float | None:
+        """One RH on the room scale for urgency: surface RH shifted by (surface target - room target)."""
+        c = config.control
+        vals = [v for v in (self.room_rh_pct,) if v is not None]
+        if self.surface_rh_pct is not None and c.surface_demand_enabled:
+            vals.append(self.surface_rh_pct - (c.surface_target_rh_pct - c.target_rh_pct))
+        return max(vals) if vals else None
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+def humidity_demand(cond: Conditions, ind: AirState, outd: AirState | None, config: AppConfig) -> HumidityDemand:
+    rooms = [r for r in cond.rooms if r.get("air") is not None]
+    skipped: list[str] = []
+    if config.control.zone_aggregation == "mean" or not rooms:
+        room_rh, label = ind.rh * 100, cond.indoor_label
+    else:
+        pool = rooms
+        if outd is not None:
+            pool = [r for r in rooms if r["air"].w > outd.w]
+            skipped = [r["name"] for r in rooms if r not in pool]
+        if pool:
+            top = max(pool, key=lambda r: r["air"].rh)
+            room_rh, label = top["air"].rh * 100, top["name"]
+        else:
+            room_rh, label = None, "no room ventilation can dry"
+    d = HumidityDemand(room_rh, label, skipped_rooms=skipped)
+    if cond.surface_source == "measured" or cond.surfaces:
+        unc_c = config.surfaces.probe_uncertainty_f / 1.8
+        best = None
+        for sp in cond.surfaces:
+            if sp.get("t_c") is None:
+                continue
+            loc = sp.get("local") or ind
+            if outd is not None and loc.w <= outd.w:
+                continue
+            srh = loc.pw_kpa / psychro.saturation_pressure(sp["t_c"] - unc_c) * 100
+            if best is None or srh > best[0]:
+                best = (srh, sp.get("name") or "surface")
+        if best:
+            d.surface_rh_pct, d.surface_label = best
+    return d
+
+
 def decide(
     cond: Conditions,
     state: GroupState,
@@ -162,8 +233,10 @@ def decide(
     # xa: the air the exhaust fan actually removes (ventilation-path zones). Direction and removal use it;
     # the RH target and urgency use the aggregate (by default the wettest zone).
     xa = (cond.exhaust or ind) if ind else None
+    demand = humidity_demand(cond, ind, outd, config) if ind else None
     if ind and outd:
-        effect = ventilation_effect(xa, outd, fans, config.house, cond.upstairs) if fans else None
+        effect = (ventilation_effect(xa, outd, fans, config.house, cond.upstairs,
+                                     aux_w=circulator_aux_w(config) if not group.zone else 0.0) if fans else None)
         metrics = {
             "indoor": ind.to_dict(),
             "outdoor": outd.to_dict(),
@@ -192,7 +265,8 @@ def decide(
                             minutes=mins)
         _, e_value = profile_thresholds(config)
         tres = tamo.evaluate(ind, outd, effect, look, config, state.is_on, cond.surface_c, e_value,
-                             surfaces=cond.surfaces, air_follow=cond.surface_follow)
+                             surfaces=cond.surfaces, air_follow=cond.surface_follow,
+                             demand_rh_pct=demand.equivalent_rh_pct(config) if demand else None)
         tamo_out = {
             "in_control": policy == ControlPolicy.TAMO,
             "terms": {"benefit_g_h": tres.benefit_g_h, "thermal_penalty_g_h": tres.thermal_penalty_g_h,
@@ -225,6 +299,8 @@ def decide(
         if outd:
             metrics["condensation_margin_f"] = delta_c_to_f(cond.surface_c - outd.dew_point_c)
     metrics["indoor_label"] = cond.indoor_label
+    if demand:
+        metrics["demand"] = demand.to_dict()
 
     if not fans:
         return out(False, "NO_FANS", "Fans OFF: no enabled fans are assigned to this group.", immediate=True)
@@ -245,8 +321,11 @@ def decide(
     checks.append(Check("interlocks", "Safety interlocks", interlock is None,
                         interlock[1] if interlock else "None active", hard=True))
 
-    # starting needs 0.5°F more margin than continuing, so the fans do not chatter at the safety boundary
-    condensation = _condensation(cond, xa, tres, c.surface_margin_f + (0.0 if state.is_on else 0.5))
+    # starting needs 0.5°F more margin than continuing, so the fans do not chatter at the safety boundary;
+    # a measured probe also carries its own and the dew point's uncertainty (as surface monitoring does)
+    unc_f = (math.hypot(config.surfaces.probe_uncertainty_f, config.surfaces.dew_point_uncertainty_f)
+             if cond.surface_source == "measured" else 0.0)
+    condensation = _condensation(cond, xa, tres, c.surface_margin_f + unc_f + (0.0 if state.is_on else 0.5))
     checks.append(Check("condensation", "Condensation margin", condensation[0], condensation[2], hard=True))
 
     thermal_block = _thermal_safety(cond, look, config) if (ind and look) else None
@@ -324,27 +403,44 @@ def decide(
                    immediate=True)
 
     if policy == ControlPolicy.TAMO:
-        return _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons, checks, out)
+        return _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons, checks, out, demand)
 
-    rh_pct = ind.rh * 100
     start_rh = c.target_rh_pct + c.rh_start_deadband_pct
     # A strong drying window is rare in New Orleans and the wood and concrete hold far more water than the
     # air: once running, keep going below the target while outdoor air is much drier.
     dry_window = adv_f >= c.dry_window_advantage_f
     stop_rh = min(c.target_rh_pct, c.dry_window_stop_rh_pct) if dry_window else c.target_rh_pct
-    rh_ok = rh_pct > stop_rh if on else rh_pct > start_rh
+    rh_pct = demand.room_rh_pct
+    room_ok = rh_pct is not None and (rh_pct > stop_rh if on else rh_pct > start_rh)
     window_txt = (f"; strong drying window ({adv_f:.0f}°F drier outside), running continues to {stop_rh:.0f}%"
                   if on and dry_window and stop_rh < c.target_rh_pct else "")
-    checks.append(Check("rh", "Basement above target", rh_ok,
-                        f"Basement RH {rh_pct:.0f}% vs target {c.target_rh_pct:.0f}%{window_txt}"))
-    if not rh_ok:
-        if on:
+    skip_txt = (f"; {', '.join(demand.skipped_rooms)} already holds less water than outdoor air"
+                if demand.skipped_rooms else "")
+    room_txt = (f"Most humid room {demand.room_label} {rh_pct:.0f}% vs target {c.target_rh_pct:.0f}%"
+                if rh_pct is not None else "No room's air holds more water than outdoor air")
+    checks.append(Check("rh", "Room humidity above target", room_ok, room_txt + window_txt + skip_txt))
+    srh = demand.surface_rh_pct if c.surface_demand_enabled else None
+    surf_ok = False
+    if srh is not None:
+        s_need = c.surface_target_rh_pct if on else c.surface_target_rh_pct + c.surface_rh_deadband_pct
+        surf_ok = srh > s_need
+        checks.append(Check("surface_rh", "Surface humidity above target", surf_ok,
+                            f"{demand.surface_label}: about {min(srh, 100):.0f}% RH at the surface (conservative) vs "
+                            f"target {c.surface_target_rh_pct:.0f}%"))
+    if not (room_ok or surf_ok):
+        if rh_pct is None:
+            reason = ("BELOW_TARGET", "Fans OFF: the humid rooms already hold less water than the outdoor air, so "
+                                      "ventilation cannot dry them.")
+        elif on:
             reason = ("TARGET_REACHED", "Fans OFF: basement humidity has reached the configured target"
                       + (f" ({stop_rh:.0f}% during a strong drying window)." if stop_rh < c.target_rh_pct else "."))
         else:
-            reason = ("BELOW_TARGET", f"Fans OFF: basement humidity ({rh_pct:.0f}%) is at or near the target "
-                                      f"({c.target_rh_pct:.0f}%).")
+            reason = ("BELOW_TARGET", f"Fans OFF: the most humid room ({demand.room_label}, {rh_pct:.0f}%) is at or "
+                                      f"near the target ({c.target_rh_pct:.0f}%)"
+                      + (" and measured surfaces are below their target." if srh is not None else "."))
         return out(False, *reason)
+    if surf_ok and not room_ok:
+        reasons.append("SURFACE_HUMIDITY_HIGH")
 
     adv_needed = c.dewpoint_off_advantage_f if on else c.dewpoint_on_advantage_f
     adv_ok = adv_f > adv_needed if on else adv_f >= adv_needed
@@ -381,12 +477,15 @@ def decide(
     if cond.surface_c is not None:
         margin_txt = " Condensation safety checks passed"
         margin_txt += " (using estimated surface temperature)." if cond.surface_source == "estimated" else "."
+    why = (f" Drying for {demand.surface_label}: about {min(srh, 100):.0f}% RH at the surface."
+           if surf_ok and not room_ok else "")
     return out(True, "DRYING",
-               f"Fans ON: outdoor air is significantly drier than basement air ({adv_f:.1f}°F lower dew point). "
+               f"Fans ON: outdoor air is significantly drier than basement air ({adv_f:.1f}°F lower dew point).{why} "
                f"Estimated moisture removal is {_gal_h(effect.net_removal_g_h)}.{margin_txt}")
 
 
-def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons, checks, out) -> Decision:
+def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons, checks, out,
+                   demand: HumidityDemand | None = None) -> Decision:
     t = config.temperature
     ind = cond.indoor
     on = state.is_on
@@ -411,9 +510,13 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
         return out(False, "MOISTURE_BENEFIT_INSUFFICIENT",
                    f"Fans OFF: outdoor air is slightly drier, but the estimated removal ({removal:.0f} g/h) is "
                    "below the minimum worth running for.")
-    rh_pct = ind.rh * 100
+    eq = demand.equivalent_rh_pct(config) if demand else None
+    rh_pct = eq if eq is not None else ind.rh * 100
     u = tres.urgency
-    checks.append(Check("urgency", "Humidity urgency", u > 0, f"{u:.2f} at {rh_pct:.0f}% RH "
+    where = f" ({demand.room_label})" if demand and demand.room_rh_pct is not None and eq == demand.room_rh_pct else (
+        f" (from {demand.surface_label} surface RH {demand.surface_rh_pct:.0f}%)" if demand and demand.surface_rh_pct
+        is not None else "")
+    checks.append(Check("urgency", "Humidity urgency", u > 0, f"{u:.2f} at {rh_pct:.0f}% RH{where} "
                         f"(0 at {t.urgency_low_rh_pct:.0f}%, 1 at {t.urgency_high_rh_pct:.0f}%)"))
     if u <= 0:
         return out(False, "HUMIDITY_LOW",
@@ -457,14 +560,16 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
 
         def at(out_air):
             eff = ventilation_effect(cond.exhaust or ind, out_air, group_fans(config, group), config.house,
-                                     cond.upstairs)
+                                     cond.upstairs, aux_w=effect.fan_power_w - sum(f.rated_w for f in
+                                                                                   group_fans(config, group)))
             if eff.net_removal_g_h <= 0:
                 return None
             lk = tamo.outlook(ind, out_air, up_air, eff, config, look.params, False, h, minutes=(int(h),))
             if _thermal_safety(cond, lk, config):
                 return None
             return tamo.evaluate(ind, out_air, eff, lk, config, False, cond.surface_c, e_value,
-                                 surfaces=cond.surfaces, air_follow=cond.surface_follow)
+                                 surfaces=cond.surfaces, air_follow=cond.surface_follow,
+                                 demand_rh_pct=demand.equivalent_rh_pct(config) if demand else None)
         choice = tamo.forecast_choice(cond.forecast, now, at, tres, config)
         if choice:
             metrics_fc = {**choice, "forecast_age_h": cond.forecast_age_h}

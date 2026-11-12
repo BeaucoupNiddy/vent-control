@@ -83,10 +83,12 @@ def test_circulation_runs_with_exhaust_in_automatic(tmp_path):
     c = cfg.circulators[0]
     st = circulation.CircState(verified=True)
     now = __import__("datetime").datetime(2026, 7, 1, 12, tzinfo=__import__("datetime").timezone.utc)
-    d = circulation.decide_circulator(c, cfg, {}, [], st, now, {"on": True, "drying": True, "auto_on": True}, None, 12)
+    from .test_v3 import zs
+    z = {"main": zs(cfg, "main", 72, 60), "pocket": zs(cfg, "pocket", 72, 60)}
+    d = circulation.decide_circulator(c, cfg, z, [], st, now, {"on": True, "drying": True, "auto_on": True}, None, 12)
     assert d.target_on and d.reason_code == "RUN_WITH_EXHAUST"
     st.last_reason = d.reason_code
-    d2 = circulation.decide_circulator(c, cfg, {}, [], st, now + timedelta(minutes=5), {"on": False}, None, 12)
+    d2 = circulation.decide_circulator(c, cfg, z, [], st, now + timedelta(minutes=5), {"on": False}, None, 12)
     assert d2.target_on and d2.reason_code == "POST_EXHAUST_RUN"  # short run-on after the exhaust stops
     st.last_reason = d2.reason_code
     d3 = circulation.decide_circulator(c, cfg, {}, [], st, now + timedelta(minutes=60), {"on": False}, None, 12)

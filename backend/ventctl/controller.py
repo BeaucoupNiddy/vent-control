@@ -287,6 +287,7 @@ class Controller:
             if cfg.mode != Mode.SIMULATION:
                 gs.is_on, gs.verified = self._group_switch_state(g.id)
             cond = conditions_for_group(snap, g, cfg)
+            self._pause_for_comparison(cond)
             cond.forecast, cond.forecast_age_h = fc, fc_age
             cond.surface_follow = air_follow
             was_on = gs.is_on
@@ -372,9 +373,11 @@ class Controller:
         ext_on = any(gs.is_on for gs in self.groups.values())
         drying = any(d.target_on and d.effect is not None and d.effect.net_removal_g_h > 0
                      for d in self.decisions.values())
-        # the exhaust fans are running because Automatic (or a schedule) chose to, not by hand
-        auto_on = cfg.mode in (Mode.AUTO, Mode.SCHEDULE) and any(
-            d.target_on and self.groups.get(gid, GroupState()).is_on for gid, d in self.decisions.items())
+        # the exhaust fans are running because Automatic chose to dry, not by hand or on a schedule (a schedule
+        # can run while outdoor air adds moisture)
+        auto_on = cfg.mode == Mode.AUTO and any(
+            d.target_on and self.groups.get(gid, GroupState()).is_on and d.effect is not None
+            and d.effect.net_removal_g_h > 0 for gid, d in self.decisions.items())
         exterior = {"on": ext_on, "drying": ext_on and drying, "auto_on": auto_on}
         for c in cfg.circulators:
             st = self.circ_states.setdefault(c.id, circulation.CircState())
@@ -521,6 +524,17 @@ class Controller:
                                f"{mode}", "CIRCULATION_MODE", {"by": who, "from": old, "to": mode})
 
     # sensor side-by-side comparison (commissioning)
+    def _pause_for_comparison(self, cond) -> None:
+        """While the outdoor sensor sits indoors for a side-by-side comparison it is not measuring outdoor air:
+        Automatic treats the outdoor reading as missing (fans stay off) until the comparison is stopped."""
+        if not self.comparison:
+            return
+        ids = set(self.comparison.get("sensor_ids") or [])
+        if any(m.sensor_id in ids and m.role == SensorRole.OUTDOOR for m in self.config.sensors.mappings):
+            cond.outdoor = None
+            cond.outdoor_problem = ("the outdoor sensor is indoors for a side-by-side comparison; automatic "
+                                    "ventilation is paused until the comparison is stopped and it is back outside")
+
     def comparison_start(self, sensor_ids: list[str]) -> dict:
         now = self.clock.now()
         self.comparison = {"sensor_ids": sensor_ids, "started_at": now.isoformat()}

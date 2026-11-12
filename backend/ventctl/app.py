@@ -703,7 +703,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
 
     async def setup_state(probe: bool) -> dict:
         c = ctrl()
-        ctx: dict = {}
+        ctx: dict = {"comparison": c.comparison_status()}
         if probe and c.config.sensors.provider != "mock":
             try:
                 ctx["channels"] = await asyncio.wait_for(c.sensors.discover(), timeout=10)

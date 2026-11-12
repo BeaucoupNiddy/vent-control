@@ -66,6 +66,10 @@ const HOWTO: Record<string, ReactNode> = {
   safety: <p>An exhaust fan lowers the air pressure in the basement. That's how it works, but it can pull fumes back down a chimney from a gas water heater or furnace. Answer honestly; the app blocks the fan if it can't run safely.</p>,
   targets: <p>The defaults suit most basements. The app runs the fan only when outdoor air is drier than basement air, and keeps the basement within your temperature range.</p>,
   golive: <p>When everything above is green, switch to Automatic. The app then decides on its own when to run the exterior fan. You can switch back to Off any time from the Home page.</p>,
+  verify: <>
+    <p>Automatic is running on assumptions: how much air the fans really move, how much comes down from the house, and whether the sensors agree. These checks turn the biggest ones into measurements. Do them over the first few weeks; nothing here needs to be done at once.</p>
+    <p>Rooms really can differ, so never adjust a sensor just because it disagrees with another room. Compare them <b>side by side</b> first (Diagnostics tab → sensor comparison). While the outdoor sensor is inside for the comparison, Automatic keeps the exhaust fans off.</p>
+  </>,
 };
 
 /* ---------- step editors ---------- */
@@ -126,6 +130,7 @@ function Editor({ step, cfg, change, after }: { step: string; cfg: Json; change:
       <div className="form">
         <Num cfg={cfg} path="control.target_rh_pct" label="Humidity target (%)" change={change} hint="50-55% is typical" />
         <Num cfg={cfg} path="control.upper_rh_pct" label="Upper humidity limit (%)" change={change} />
+        <Num cfg={cfg} path="control.surface_target_rh_pct" label="Slab and wall humidity target (%)" change={change} hint="Needs a concrete probe. About 70% leaves headroom below where mold tends to start." />
         <Num cfg={cfg} path="temperature.preferred_min_f" label="Preferred lowest temperature (°F)" change={change} />
         <Num cfg={cfg} path="temperature.preferred_max_f" label="Preferred highest temperature (°F)" change={change} />
         <Num cfg={cfg} path="temperature.min_allowed_f" label="Never cool below (°F)" change={change} />
@@ -429,7 +434,7 @@ export default function Setup({ onSaved }: { onSaved: () => void }) {
           <Checks checks={step.checks} answers={p.answers} answer={(k, v) => progress({ answers: { [k]: v } })} />
           {step.id === "golive" && (
             <div className="row" style={{ margin: "10px 0" }}>
-              <button className="btn primary" disabled={!steps.slice(0, -1).every((s) => s.ready || s.state)} onClick={async () => { await api.setMode("auto"); onSaved(); recheck(); }}>Switch to Automatic</button>
+              <button className="btn primary" disabled={!steps.slice(0, idx).every((s) => s.ready || s.state)} onClick={async () => { await api.setMode("auto"); onSaved(); recheck(); }}>Switch to Automatic</button>
               <button className="btn" onClick={() => progress({ finished: true, mark: { step: "golive", state: "done" } })}>Finish setup</button>
             </div>)}
           {err && <p className="error" style={{ whiteSpace: "pre-wrap" }}>{err}</p>}
