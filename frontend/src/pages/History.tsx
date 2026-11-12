@@ -4,8 +4,16 @@ import { Card, Stat, TimeChart, fanIntervals } from "../components";
 import { hours, num, pct, tempVal, useUnit } from "../units";
 import { POLICY_NAMES } from "./Tamo";
 import { ZoneHistory } from "./Zones";
+import { Seg } from "./home/charts";
+import { HIcon } from "./home/icons";
+import { DeviceCheck } from "./history/DeviceCheck";
+import { Explorer } from "./history/Explorer";
+import { chartRows, plugsFrom, sourcesFrom } from "./history/data";
+import "./home.css";
+import "./history.css";
 
-const RANGES = [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["custom", "Custom"]];
+const RANGES = [["24h", "24 hours"], ["7d", "7 days"], ["30d", "30 days"], ["custom", "Custom"]] as const;
+const MORE_KEY = "ventctl.history.more";
 
 export default function History() {
   const u = useUnit();
@@ -20,9 +28,19 @@ export default function History() {
   const [therm, setTherm] = useState<Json>(null);
   const [cfgT, setCfgT] = useState<Json>(null);
   const [fitMsg, setFitMsg] = useState("");
+  const [cfg, setCfg] = useState<Json>(null);
+  const [status, setStatus] = useState<Json>(null);
+  const [more, setMore] = useState<boolean>(() => { try { return localStorage.getItem(MORE_KEY) === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem(MORE_KEY, more ? "1" : "0"); } catch { /* storage unavailable */ } }, [more]);
   useEffect(() => {
     api.thermal().then(setTherm).catch(() => {});
-    api.config().then((c) => setCfgT(c.temperature)).catch(() => {});
+    api.config().then((c) => { setCfg(c); setCfgT(c.temperature); }).catch(() => {});
+  }, []);
+  useEffect(() => {
+    const load = () => api.status().then(setStatus).catch(() => {});
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
   }, []);
 
   const custom = range === "custom";
@@ -60,24 +78,20 @@ export default function History() {
       ...z,
     };
   }), [data, u]);
-  const zoneKeys = useMemo(() => {
-    const s = new Set<string>();
-    rows.forEach((r: Json) => Object.keys(r).filter((k) => k.startsWith("zone_")).forEach((k) => s.add(k)));
-    return [...s];
-  }, [rows]);
-
+  const sources = useMemo(() => sourcesFrom(cfg), [cfg]);
+  const plugs = useMemo(() => plugsFrom(cfg), [cfg]);
+  const devRows = useMemo(() => chartRows(data?.rows || [], sources, u), [data, sources, u]);
   const fan = fanIntervals(rows);
   const spanDays = rows.length > 1 ? (rows[rows.length - 1].x - rows[0].x) / 864e5 : 1;
   const xf = (x: number) => new Date(x).toLocaleString(undefined, spanDays > 1.5
     ? { month: "short", day: "numeric", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
   const T = `°${u}`;
-  const zoneColors = ["var(--series-1)", "var(--series-3)", "var(--series-4)", "var(--series-5)"];
   const src = data?.rows?.[0]?.source;
-  // the whole-basement average only adds information when there is more than one zone
-  const showAvg = zoneKeys.length > 1 && rows.some((r: Json) => r.avg_rh != null);
-  const inName = showAvg ? "Basement (used for control)" : "Basement";
-  const avgSeries = (key: string) => (showAvg ? [{ key, name: "Whole-basement average", color: "var(--series-6)", dashed: true }] : []);
   const ba = stats?.basement_average;
+  const showAvg = sources.some((x) => x.kind === "avg");
+  const rangeText = rows.length > 1
+    ? `${new Date(rows[0].x).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} to ${new Date(rows[rows.length - 1].x).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`
+    : "Pick a time range";
 
   const f2u = (f: number) => (u === "F" ? f : ((f - 32) * 5) / 9);
   async function refit() {
@@ -98,19 +112,21 @@ export default function History() {
   }
 
   return (
-    <>
-      <Card title="History" right={
-        <div className="row">
+    <div className="home hx">
+      <section className="h-panel hx-head">
+        <header className="h-panel-head">
+          <span className="h-panel-icon"><HIcon name="clock" size={18} /></span>
+          <div className="h-panel-title"><h2>History</h2><span>{rangeText}</span></div>
+          <span className="spacer" />
           {src === "mock" && <span className="badge mock">mock data</span>}
-          <div className="seg">
-            {RANGES.map(([k, l]) => <button key={k} className={range === k ? "active" : ""} onClick={() => setRange(k)}>{l}</button>)}
+          <Seg value={range} options={RANGES} onChange={setRange} label="Time range" small={false} />
+        </header>
+        {custom && (
+          <div className="hx-custom">
+            <label>From <input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} /></label>
+            <label>To <input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} /></label>
           </div>
-          {custom && (<>
-            <input type="datetime-local" value={start} onChange={(e) => setStart(e.target.value)} />
-            <input type="datetime-local" value={end} onChange={(e) => setEnd(e.target.value)} />
-          </>)}
-        </div>
-      }>
+        )}
         {err && <p className="error">{err}</p>}
         {stats && (
           <div className="grid g4">
@@ -121,35 +137,28 @@ export default function History() {
             <Stat label="Electricity" badge={stats.electricity_label} value={`${stats.electricity_kwh.toFixed(2)} kWh · $${stats.electricity_cost.toFixed(2)}`} />
             <Stat label="Above upper RH" value={hours(stats.hours_above_upper)} />
             <Stat label="Above high RH" value={hours(stats.hours_above_high)} />
-            {ba && zoneKeys.length > 1 && <Stat label="Whole-basement average RH" value={`${pct(ba.mean_rh_pct)} (${pct(ba.min_rh_pct)}–${pct(ba.max_rh_pct)})`} />}
+            {ba && showAvg && <Stat label="Whole-basement average RH" value={`${pct(ba.mean_rh_pct)} (${pct(ba.min_rh_pct)}–${pct(ba.max_rh_pct)})`} />}
             <Stat label="Ventilation favorable" badge="modeled" value={pct(stats.favorable_pct)} />
             <Stat label="Conditioned air lost" badge="modeled" value={`${Math.round(stats.conditioned_air_ft3).toLocaleString()} ft³ · $${stats.conditioned_air_cost.toFixed(2)}`} />
             {stats.dehumidifier && <Stat label="Dehumidifier" value={`${hours(stats.dehumidifier.runtime_h)} · ${stats.dehumidifier.kwh.toFixed(1)} kWh`} />}
             {stats.dehumidifier && <Stat label="Dehumidifier water" badge="modeled" value={`${stats.dehumidifier.water_gal_estimate.toFixed(1)} gal`} />}
           </div>
         )}
-      </Card>
+      </section>
 
-      {rows.length === 0 ? <Card><p className="muted">No recorded data in this range.</p></Card> : (
+      {rows.length === 0 ? <section className="h-panel"><p className="muted">No recorded data in this range.</p></section> : (<>
+        <Explorer sources={sources} rows={devRows} u={u} xf={xf} fan={fan} />
+        <DeviceCheck sources={sources} plugs={plugs} raw={data?.rows || []} rows={devRows} u={u} xf={xf} fan={fan} status={status} />
+      </>)}
+
+      <button className={`hx-more-toggle ${more ? "open" : ""}`} onClick={() => setMore(!more)} aria-expanded={more}>
+        <HIcon name="grid" size={16} />
+        <span>{more ? "Hide detailed charts" : "More charts"}<small>Moisture model, thermal impact, zones, fan decisions and replay</small></span>
+        <span className="hx-chev"><HIcon name="chevron" size={16} /></span>
+      </button>
+
+      {more && rows.length > 0 && (
         <div className="grid g2">
-          <Card><TimeChart title="Temperature" unit={T} data={rows} xFormat={xf} fanOn={fan} series={[
-            { key: "in_t", name: inName, color: "var(--series-1)" },
-            ...avgSeries("avg_t"),
-            { key: "out_t", name: "Outdoor", color: "var(--series-2)" },
-            { key: "surf", name: "Coldest surface", color: "var(--series-3)", dashed: true },
-          ]} /></Card>
-          <Card><TimeChart title="Dew point" unit={T} data={rows} xFormat={xf} fanOn={fan} series={[
-            { key: "in_td", name: inName, color: "var(--series-1)" },
-            ...avgSeries("avg_td"),
-            { key: "out_td", name: "Outdoor", color: "var(--series-2)" },
-          ]} /></Card>
-          <Card><TimeChart title="Relative humidity" unit="%" data={rows} xFormat={xf} fanOn={fan} digits={0} series={[
-            { key: "in_rh", name: inName, color: "var(--series-1)" },
-            ...avgSeries("avg_rh"),
-            { key: "out_rh", name: "Outdoor", color: "var(--series-2)" },
-          ]} /></Card>
-          <Card><TimeChart title="Basement humidity by room" unit="%" data={rows} xFormat={xf} fanOn={fan} digits={0}
-            series={zoneKeys.map((k, i) => ({ key: k, name: k.replace("zone_", ""), color: zoneColors[i % 4] }))} /></Card>
           <Card><TimeChart title="Humidity-ratio difference (basement − outdoor)" unit="g/kg" data={rows} xFormat={xf} fanOn={fan}
             zeroLine digits={2} series={[{ key: "dw", name: "ΔW", color: "var(--series-1)" }]} />
             <p className="faint">Above zero: outdoor air is drier. Below zero: ventilation would add moisture.</p></Card>
@@ -181,8 +190,9 @@ export default function History() {
         </div>
       )}
 
-      {rows.length > 0 && <ZoneHistory rawRows={data?.rows || []} range={range} xf={xf} fan={fan} />}
+      {more && rows.length > 0 && <ZoneHistory rawRows={data?.rows || []} range={range} xf={xf} fan={fan} />}
 
+      {more && (<>
       <div className="grid g2">
         <Card title="Shadow comparison" right={<span className="badge modeled">recorded decisions</span>}>
           {!shadow || !shadow.hours_compared ? <p className="muted">No shadow decisions recorded in this range.</p> : (
@@ -255,6 +265,7 @@ export default function History() {
           </div>
         )}
       </Card>
-    </>
+      </>)}
+    </div>
   );
 }

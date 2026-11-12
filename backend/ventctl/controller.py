@@ -1252,6 +1252,7 @@ class Controller:
             surfaces[sst.sensor_id] = {"t_c": sst.t_c, "dew_c": sst.local.dew_point_c if sst.local else None,
                                        "margin_f": sst.margin_f, "cons_margin_f": sst.conservative_margin_f,
                                        "srh": sst.surface_rh, "risk": sst.risk, "zone": sst.zone}
+        devices = self._device_snapshot(sim)
         dh = self.dehum_status
         self.storage.add_history(now, {
             "source": self.data_source,
@@ -1285,7 +1286,32 @@ class Controller:
             "upstairs_t_c": allc.upstairs.t_c if allc.upstairs else None,
             "upstairs_w": allc.upstairs.w if allc.upstairs else None,
             "exhaust_w": (allc.exhaust or allc.indoor).w if allc.indoor else None,
+            "devices": devices,
         })
+
+    def _device_snapshot(self, sim: bool) -> dict:
+        """Every sensor's own reading and every plug's own state, so each device can be charted and audited."""
+        sensors = {}
+        for r in (self.snapshot.readings if self.snapshot else []):
+            m = r.mapping
+            sensors[m.sensor_id] = {
+                "t_c": round(r.temp_c, 3) if r.ok and r.temp_c is not None else None,
+                "rh": round(r.rh * 100, 2) if r.ok and r.rh is not None else None,
+                "ok": 1 if r.ok else 0,
+            }
+        plugs = {}
+        ids = [f.switch_id for f in self.config.fans if f.switch_id] + \
+              [c.switch_id for c in self.config.circulators if c.switch_id]
+        for sid in dict.fromkeys(ids):
+            info = self.switch_info.get(sid)
+            on = None if info is None or info.confirmed is None else int(bool(info.confirmed))
+            plugs[sid] = {"on": on, "ok": 1 if (info and info.reachable) else 0,
+                          "w": round(info.power_w, 1) if info and info.power_w is not None else None}
+        if sim:
+            for f in self.config.fans:
+                if f.switch_id in plugs:
+                    plugs[f.switch_id]["on"] = int(self.groups.get(f.group, GroupState()).is_on)
+        return {"sensors": sensors, "plugs": plugs}
 
     # ------------------------------------------------------------ status
     def _circ_status(self, now: datetime) -> list[dict]:
