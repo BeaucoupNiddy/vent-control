@@ -336,6 +336,39 @@ class Storage:
                                "FROM weather_cache GROUP BY source, station")
         return [dict(r) for r in rows]
 
+    def backup(self) -> str | None:
+        """Copy the whole database to data/backups/ before a destructive change. Returns the backup path."""
+        if self.path == ":memory:":
+            return None
+        folder = Path(self.path).parent / "backups"
+        folder.mkdir(parents=True, exist_ok=True)
+        dest = folder / f"{Path(self.path).stem}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.db"
+        with self._lock:
+            out = sqlite3.connect(str(dest))
+            try:
+                self.db.backup(out)
+            finally:
+                out.close()
+        return str(dest)
+
+    def delete_data(self, start: datetime | None, end: datetime | None) -> dict[str, int]:
+        """Delete recorded history, events, circulation cycles and temperature-prediction checks with
+        timestamps in [start, end). None means unbounded. Settings, learned models and weather are kept."""
+        tables = {"history": "ts", "events": "ts", "circulation_cycles": "ts_start", "thermal_predictions": "ts_start"}
+        counts = {}
+        with self._lock:
+            for table, col in tables.items():
+                where, args = ["1=1"], []
+                if start is not None:
+                    where.append(f"{col} >= ?")
+                    args.append(_iso(start))
+                if end is not None:
+                    where.append(f"{col} < ?")
+                    args.append(_iso(end))
+                counts[table] = self.db.execute(f"DELETE FROM {table} WHERE {' AND '.join(where)}", args).rowcount
+            self.db.commit()
+        return counts
+
     def prune(self, now: datetime, retention_days: int) -> None:
         cutoff = _iso(now - timedelta(days=retention_days))
         with self._lock:

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Json } from "./api";
 import { Icon } from "./components";
+import Ask from "./pages/Ask";
 import Dashboard from "./pages/Dashboard";
 import Diagnostics from "./pages/Diagnostics";
 import Events from "./pages/Events";
@@ -12,7 +13,7 @@ import Setup from "./pages/Setup";
 import Simulation from "./pages/Simulation";
 import { TempUnit, UnitContext } from "./units";
 
-const TABS = ["Home", "Setup", "Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
+const TABS = ["Home", "Ask", "Setup", "Dashboard", "History", "Simulation", "Reports", "Settings", "Events", "Diagnostics"] as const;
 type Tab = (typeof TABS)[number];
 
 function load<T>(k: string, d: T): T {
@@ -81,6 +82,7 @@ export default function App() {
               <div style={{ marginTop: 6 }}><button className="btn primary" onClick={() => setTab("Setup")}>{setup.progress.started_at ? "Resume setup" : "Start setup"}</button></div></div>
           </div>)}
         {tab === "Home" && <Home status={status} refresh={refresh} openTab={(t) => setTab(t as Tab)} />}
+        {tab === "Ask" && <Ask />}
         {tab === "Dashboard" && <Dashboard status={status} refresh={refresh} />}
         {tab === "History" && <History />}
         {tab === "Simulation" && <Simulation />}

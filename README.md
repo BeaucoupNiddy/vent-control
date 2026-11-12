@@ -300,6 +300,20 @@ The Simulation page compares eight circulation strategies with the same exterior
 
 ---
 
+## Ask: plain-language explainer (optional)
+
+The **Ask** tab lets you chat with an AI model through [OpenRouter](https://openrouter.ai) about why the fans are on or off. Paste an OpenRouter API key, pick a model from the list (fetched live from OpenRouter, with prices) and ask a question. Each question sends the model the current status (readings, every group's decision, reason codes and checks), the last 6 hours of trend, the 30 most recent events, your settings with passwords and tokens removed, and a plain-language summary of the rules (`backend/ventctl/explainer.py`). "See exactly what the model is sent" opens that text.
+
+- **Read-only.** The model only answers in text; nothing it says is turned into a command.
+- **The key stays on this computer**, in `data/openrouter.json` (owner-only permissions, ignored by git). It is never put in the config, database, logs or exports, and the API only reports its last 4 characters. It is only sent to OpenRouter.
+- Answers can be wrong; the Dashboard's checks are what the controller actually used.
+
+## Alerts and old data
+
+- **Dismiss alerts** with the × on Home or the Dashboard, or "Dismiss all". A dismissed alert stays hidden until its problem clears, then comes back if the problem returns. Dismissing only hides it: fail-safes still act. "Show N dismissed" brings them back.
+- **Stale alerts clear themselves.** Every alert is re-checked each minute, and one whose fan, sensor, zone or probe no longer exists is cleared.
+- **Reset recorded data** (Settings): delete history, events and fan-cycle records from a point in time up to now, older than a point in time, or all of it. Settings and learned models are kept, and the whole database is first copied to `data/backups/`.
+
 ## Fail-safe behavior
 
 | Situation | What happens |

@@ -3,6 +3,7 @@ import { api, Json } from "../api";
 import { Card } from "../components";
 import { ZoneSettings } from "./SettingsZones";
 import { UpdateCard } from "./SettingsUpdate";
+import { DataResetCard } from "./SettingsData";
 
 function get(o: Json, path: string) {
   return path.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
@@ -215,6 +216,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
           The controller never changes safety limits on its own.</p>
       </Card>
       <UpdateCard />
+      <DataResetCard />
       <Hardware cfg={cfg} change={change} />
       <Groups cfg={cfg} change={change} />
       <ZoneSettings cfg={cfg} change={change} />

@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, calibration, climate, reports, setup_guide, simulation, updater, weather
+from . import analysis, calibration, climate, explainer, reports, setup_guide, simulation, updater, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -134,6 +134,31 @@ class SetupChange(BaseModel):
     answers: dict | None = None
     mark: dict | None = None  # {"step": id, "state": "done" | "skipped" | None}
     finished: bool = False
+
+
+class ChatSettings(BaseModel):
+    api_key: str | None = None  # "" removes the saved key
+    model: str | None = None
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str | None = None
+
+
+class DismissRequest(BaseModel):
+    ids: list[str] | None = None  # None dismisses every current alert
+    restore: bool = False  # true shows dismissed alerts again
+
+
+class ResetRequest(BaseModel):
+    scope: str  # "all" | "since" (from a time up to now) | "before" (older than a time)
+    at: str | None = None  # ISO date/time for since/before; local time if no offset is given
 
 
 class CalcRequest(BaseModel):
@@ -303,6 +328,46 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(502, str(e) or type(e).__name__)
         known = {d.host.strip(): d.switch_id for d in sw.tapo_devices}
         return {"plugs": [{**p, "switch_id": known.get(p["host"])} for p in plugs]}
+
+    @app.post("/api/alerts/dismiss")
+    def dismiss_alerts(req: DismissRequest):
+        if req.restore:
+            ctrl().restore_alerts()
+        else:
+            n = ctrl().dismiss_alerts(req.ids)
+            state["storage"].add_event(ctrl().clock.now(), "override", "info",
+                                       f"{n} alert{'s' if n != 1 else ''} dismissed from the dashboard", "ALERTS_DISMISSED")
+        return ctrl().status()
+
+    @app.post("/api/data/reset")
+    def reset_data(req: ResetRequest):
+        """Delete recorded data (a backup of the whole database is made first)."""
+        now = ctrl().clock.now()
+        at = None
+        if req.scope in ("since", "before"):
+            if not req.at:
+                raise HTTPException(400, "Pick a date and time")
+            try:
+                at = datetime.fromisoformat(req.at)
+            except ValueError:
+                raise HTTPException(400, "That date and time isn't valid")
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=tz())
+            if at > now:
+                raise HTTPException(400, "Pick a time in the past")
+        elif req.scope != "all":
+            raise HTTPException(400, "scope must be all, since or before")
+        storage = state["storage"]
+        backup = storage.backup()
+        start, end = {"all": (None, None), "since": (at, None), "before": (None, at)}[req.scope]
+        counts = storage.delete_data(start, end)
+        if req.scope != "before":
+            ctrl().last_history = None  # write a fresh history row on the next tick
+        what = {"all": "all recorded data", "since": f"data since {at.astimezone(tz()):%b %d %I:%M %p}" if at else "",
+                "before": f"data before {at.astimezone(tz()):%b %d %I:%M %p}" if at else ""}[req.scope]
+        storage.add_event(now, "config", "warning", f"Deleted {what} ({counts['history']} readings, "
+                          f"{counts['events']} events). Backup: {Path(backup).name if backup else 'none'}", "DATA_RESET")
+        return {"deleted": counts, "backup": backup}
 
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):
@@ -638,6 +703,53 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     async def reset_setup():
         ctrl().storage.set_kv(setup_guide.PROGRESS_KEY, setup_guide.empty_progress())
         return await setup_state(False)
+
+    # ------------------------------------------------------------ plain-language explainer (read-only)
+    keys = explainer.KeyStore(Path(db_path).resolve().parent)
+
+    def chat_context() -> str:
+        c = ctrl()
+        now = c.clock.now()
+        rows = state["storage"].history(now - timedelta(hours=6), now, max_points=10**6)
+        return explainer.build_context(c.status(), c.config.model_dump(mode="json"),
+                                       state["storage"].events(30), explainer.recent_history(rows, tz()), tz())
+
+    @app.get("/api/chat/settings")
+    def chat_settings():
+        return keys.public()
+
+    @app.put("/api/chat/settings")
+    def put_chat_settings(req: ChatSettings):
+        keys.update(req.api_key, req.model)
+        return keys.public()
+
+    @app.get("/api/chat/models")
+    async def chat_models():
+        try:
+            return {"models": await explainer.list_models()}
+        except explainer.OpenRouterError as e:
+            raise HTTPException(502, str(e))
+
+    @app.get("/api/chat/context")
+    def chat_context_preview():
+        """Exactly what the model is shown (secrets hidden), for transparency."""
+        return PlainTextResponse(explainer.system_prompt(chat_context(), ctrl().clock.now(), tz()))
+
+    @app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        key = keys.key()
+        if not key:
+            raise HTTPException(400, "Paste your OpenRouter API key first.")
+        if not req.messages or req.messages[-1].role != "user":
+            raise HTTPException(400, "Ask a question first.")
+        model = req.model or keys.model()
+        if req.model and req.model != keys.model():
+            keys.update(model=req.model)
+        system = explainer.system_prompt(chat_context(), ctrl().clock.now(), tz())
+        try:
+            return await explainer.chat(key, model, system, [m.model_dump() for m in req.messages])
+        except explainer.OpenRouterError as e:
+            raise HTTPException(502, str(e))
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):
