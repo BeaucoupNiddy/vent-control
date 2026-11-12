@@ -1,9 +1,15 @@
 """TP-Link Tapo smart plugs over the local network (via python-kasa).
 
 Works with Tapo plugs that python-kasa supports, including the Matter-enabled
-minis (P125M, P110M, P100M). Control is local (TP-Link's KLAP protocol): the
-TP-Link account email and password are used only to derive the local
-handshake key, and no cloud is needed for normal operation.
+minis (P125M, P110M, P100M). Control is local (TP-Link's KLAP protocol) and
+needs no cloud.
+
+No TP-Link account needed
+  A plug that was never added in the Tapo app (for example one set up only
+  through Matter in Apple Home) is not linked to any account, and it accepts
+  the local handshake with no login. Leave the email and password empty.
+  Only plugs that were added in the Tapo app need that account's email and
+  password, which are used solely to derive the local handshake key.
 
 Hardware watchdog
   Tapo plugs have a built-in **auto-off** timer ("turn off N minutes after it is
@@ -33,10 +39,35 @@ from ..config import TapoDevice
 from .base import SwitchController, SwitchStatus
 
 try:  # optional dependency; only needed when the Tapo provider is selected
-    from kasa import Credentials, Discover, KasaException, Module
+    from kasa import AuthenticationError, Credentials, Discover, KasaException, Module
 except ImportError:  # pragma: no cover
     Credentials = Discover = Module = None  # type: ignore[assignment]
-    KasaException = Exception  # type: ignore[assignment,misc]
+    KasaException = AuthenticationError = Exception  # type: ignore[assignment,misc]
+
+
+async def discover_plugs(username: str = "", password: str = "", timeout: float = 5.0) -> list[dict]:
+    """Find Tapo/Kasa plugs on the local network. Read-only: nothing is switched."""
+    if Discover is None:
+        raise KasaException("python-kasa is not installed (pip install python-kasa)")
+    creds = Credentials(username, password) if username else None
+    found = await Discover.discover(credentials=creds, discovery_timeout=max(int(timeout), 3))
+    out = []
+    for host, dev in sorted(found.items()):
+        row = {"host": host, "model": None, "mac": None, "name": None, "on": None, "error": None}
+        try:
+            await dev.update()
+            row.update(model=dev.model, mac=dev.mac, name=dev.alias or None, on=bool(dev.is_on))
+        except AuthenticationError:
+            row["error"] = "This plug is linked to a TP-Link account: enter that email and password, or reset the plug"
+        except (KasaException, OSError, TimeoutError) as e:
+            row["error"] = str(e) or type(e).__name__
+        finally:
+            try:
+                await dev.disconnect()
+            except Exception:  # noqa: BLE001 - best effort cleanup
+                pass
+        out.append(row)
+    return out
 
 
 class TapoSwitches(SwitchController):

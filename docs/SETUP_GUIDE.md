@@ -25,7 +25,7 @@ Allow an afternoon for the physical work and about an hour for the app. You can 
 | Mac that stays on | 1 | Runs the controller app (already installed) |
 | AA batteries (lithium recommended outdoors), painter's tape, a small square of foam board, cable ties | | |
 
-The app works only on your home network. Nothing needs a cloud service except the one-off sign-in that lets the app talk to the Tapo plugs.
+The app works only on your home network. Nothing needs a cloud service, and you don't need a TP-Link account.
 
 ## 2. How it fits together
 
@@ -112,19 +112,23 @@ Follow Tjernlund's installation instructions for your foundation vent. Points th
 
 You'll use three: one for the exterior fan and one for each circulation fan.
 
-1. In the **Tapo** app: **+ → Plugs → P125M** (Matter mini). Follow the pairing steps and join your **2.4 GHz** Wi-Fi.
-2. Name each plug after its job: `exterior-fan`, `circ-fan-1`, `circ-fan-2`. Use the same names in the controller app.
-3. In each plug's settings, open **Device info** and write the **IP address** and **MAC** on the worksheet.
-4. In your router app, **reserve** each plug's address.
-5. In the Tapo app, under **Me → Third-Party Services**, turn on **Third-Party Compatibility** if you see it. Newer Tapo firmware needs this before other apps on your network can control the plugs.
-6. Leave the plugs' own schedules and timers off. The controller app sets each plug's auto-off timer itself, as a safety backstop.
-7. Plug each fan into its plug and the plug into a GFCI outlet.
+**No TP-Link account needed.** The P125M is a Matter plug, so you can put it on Wi-Fi with the **Home** app on your iPhone instead of the Tapo app. A plug set up this way isn't linked to any account, and the controller app talks to it directly on your network with no login.
+
+1. Plug the P125M in. Its light should blink (if it doesn't, hold its button about 5 seconds to reset it).
+2. On your iPhone, open the **Home** app: **+ → Add Accessory**, and scan the Matter code on the plug or on its box. Choose your Wi-Fi when asked. The phone must be on the same Wi-Fi as the Mac.
+3. Do this for each plug. You don't need to name them in the Home app; the controller app has its own names.
+4. Leave the plugs' own schedules and timers off, and don't add automations for them in the Home app. The controller app sets each plug's auto-off timer itself, as a safety backstop.
+5. Plug each fan into its plug and the plug into a GFCI outlet.
+6. Later, in the controller app's setup (step 7 of section 5), press **Find plugs on my Wi-Fi**. It lists each plug with its address; press **Add** on each one. To tell them apart, press the button on one plug and search again: the one that changed on/off is that plug.
+7. Optional but recommended: in your router app, **reserve** each plug's address so it never changes. Write the address and MAC on the worksheet.
+
+*Already added a plug in the Tapo app?* That's fine too. The app then needs the email and password of that TP-Link account in step 7, and in the Tapo app turn on **Me → Third-Party Services → Third-Party Compatibility** if you see it. To go account-free instead, remove the plug in the Tapo app, reset it (hold the button about 5 seconds), and add it with the Home app as above.
 
 ### 4.7 Honeywell HT-900 circulation fans
 
 1. Place each fan where you planned, **off the floor** (on a shelf, a block, or wall-mounted using its built-in hanger), pointed along the path from the drier area to the damper one.
 2. Choose a speed on the fan's own dial (Low usually suffices and is quiet). Write it on the worksheet. The app can only turn the plug on and off; it can't change speed.
-3. Leave the fan's own switch **ON**. When the plug turns on, the fan should start by itself. Test this once with the Tapo app.
+3. Leave the fan's own switch **ON**. When the plug turns on, the fan should start by itself. Test this once by pressing the plug's button.
 4. Keep the cords clear of any spot that gets wet.
 
 ### 4.8 Mac
@@ -151,7 +155,7 @@ Each step has a short explanation, the settings for that step, and a **checklist
 | 4 | Ecowitt gateway | Choose **Ecowitt gateway**, type its address, save | The gateway answers and how many sensors it hears |
 | 5 | Sensors | Press **Add** on each new channel, name it, choose where it is and its zone, remove the simulated sensors | One outdoor sensor, an air sensor in every zone, the concrete probe, all reporting fresh readings, no unused channels, battery warnings |
 | 6 | Basement zones | Rename the zones, enter sizes, tick the zone with the exterior fan | Sizes add up to the basement, a fan zone is set, dampness shares add to 100 % |
-| 7 | Smart plugs | Choose **TP-Link Tapo**, enter your TP-Link email and password, add the three plugs with their addresses, choose which plug powers which fan | Login entered, valid unique addresses, every fan on its own real plug, each plug answers |
+| 7 | Smart plugs | Choose **TP-Link Tapo**, leave the TP-Link email empty, press **Find plugs on my Wi-Fi** and **Add** each plug, choose which plug powers which fan | Valid unique addresses, every fan on its own real plug, each plug answers |
 | 8 | Exterior fan | Check the fan details (220 CFM, 40 W), press **Run 2 minutes**, listen, check outside that air blows out | Fan details, plug rated for the motor, your test |
 | 9 | Circulation fans | Set location and speed, test each, tick the three checks, press **Mark commissioned**; leave automation on **Shadow** | Speed set, your checks, commissioned, Shadow mode |
 | 10 | Safety | Answer the gas appliance question, confirm the CO alarm and that no flood vent is blocked | Gas safety block on if needed, plug safety timer on, plugs confirmed the timer |
@@ -178,8 +182,8 @@ Tips for the trickier steps:
 |---|---|
 | "Can't reach the gateway" | Check the address hasn't changed (router app), the Mac is on the same Wi-Fi, and the gateway's light is normal. Open `http://<gateway address>` in a browser on the Mac: it should show the gateway's page. |
 | A sensor shows "no fresh reading" | Batteries, distance from the gateway, or the channel changed. Check it reports in the Ecowitt app. |
-| A plug "isn't answering" | Check its address in the Tapo app, that **Third-Party Compatibility** is on, and the email/password. A Tapo firmware update can break local control: update the app (it updates its plug library), or ask for help switching the plug to Home Assistant/Matter. |
-| Fan doesn't start on test | Wait a full minute; check the plug turns on from the Tapo app; for the HT-900 check its own switch is on. |
+| A plug "isn't answering" | Press **Find plugs on my Wi-Fi** again: its address may have changed (reserve it in the router). If it says the plug is linked to a TP-Link account, either enter that account's email and password or reset the plug and add it with the Home app. A Tapo firmware update can break local control: update the app (it updates its plug library), or ask for help switching the plug to Home Assistant/Matter. |
+| Fan doesn't start on test | Wait a full minute; check the plug turns on with its own button; for the HT-900 check its own switch is on. |
 | Fan blinks off for a second every ~15 minutes | Expected: the app re-arms the plug's safety timer while the fan should keep running. |
 | Automatic never runs the fan | Usually the outdoor air is wetter than the basement (common in New Orleans summers), or a safety block is active. The Home page and Dashboard say why. |
 | Want to start setup again | Setup tab → each step stays editable. Developers can reset progress with `POST /api/setup/reset`. |
@@ -211,7 +215,7 @@ The app's **Setup → Worksheet** is the easiest version: it saves as you type a
 
 **Smart plugs (Tapo P125M)**
 
-| # | Name in Tapo app | Powers | Address (IP) | MAC | Reserved? |
+| # | Name in the controller app | Powers | Address (IP) | MAC | Reserved? |
 |---|---|---|---|---|---|
 | 1 | exterior-fan | Tjernlund V2D | | | |
 | 2 | circ-fan-1 | HT-900 #1 | | | |

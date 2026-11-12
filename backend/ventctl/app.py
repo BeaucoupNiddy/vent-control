@@ -290,6 +290,20 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         return {"info": info, "status": {"on": st.on, "reachable": st.reachable, "power_w": st.power_w,
                                          "error": st.error}}
 
+    @app.get("/api/switches/discover-tapo")
+    async def discover_tapo():
+        """List Tapo plugs on the network with their addresses, without switching them."""
+        from .hardware.tapo import discover_plugs
+        sw = ctrl().config.switches
+        try:
+            plugs = await asyncio.wait_for(discover_plugs(sw.tapo_username, sw.tapo_password), timeout=30)
+        except asyncio.TimeoutError:
+            raise HTTPException(504, "Searching for plugs took too long")
+        except Exception as e:  # noqa: BLE001 - shown to the person
+            raise HTTPException(502, str(e) or type(e).__name__)
+        known = {d.host.strip(): d.switch_id for d in sw.tapo_devices}
+        return {"plugs": [{**p, "switch_id": known.get(p["host"])} for p in plugs]}
+
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):
         ctrl().set_mode(req.mode, req.minutes, req.maintenance)

@@ -353,13 +353,14 @@ function Hardware({ cfg, change }: { cfg: Json; change: (p: string, v: Json) => 
       </>)}
       {sw.provider === "tapo" && (<>
         <h3 style={{ margin: "14px 0 6px" }}>TP-Link Tapo plugs</h3>
-        <p className="note">Local control through python-kasa. Your TP-Link account is used only to build the local connection key and is stored only in this
-          computer's database. The app turns on each plug's own auto-off timer ({sw.hardware_max_on_minutes ?? "—"} min) and re-arms it while fans run,
+        <p className="note">Local control through python-kasa. Plugs set up through Matter (e.g. Apple Home) and never added in the Tapo app need no
+          TP-Link account: leave the email and password empty. Plugs added in the Tapo app need that login, which is used only to build the
+          local connection key and is stored only in this computer's database. The app turns on each plug's own auto-off timer ({sw.hardware_max_on_minutes ?? "—"} min) and re-arms it while fans run,
           causing a ~1 s off/on blip about every {sw.hardware_max_on_minutes ? Math.round(sw.hardware_max_on_minutes / 2) : "—"} minutes.
           Only energy-monitoring models (P110M/P115) report watts. Give each plug a fixed IP in your router.</p>
         <div className="form">
-          <div className="field"><label>TP-Link account email</label><input value={sw.tapo_username} onChange={(e) => change("switches.tapo_username", e.target.value)} /></div>
-          <div className="field"><label>TP-Link password</label><input type="password" value={sw.tapo_password} onChange={(e) => change("switches.tapo_password", e.target.value)} /></div>
+          <div className="field"><label>TP-Link account email (optional)</label><input value={sw.tapo_username} onChange={(e) => change("switches.tapo_username", e.target.value)} /></div>
+          <div className="field"><label>TP-Link password (optional)</label><input type="password" value={sw.tapo_password} onChange={(e) => change("switches.tapo_password", e.target.value)} /></div>
         </div>
         {devTable("tapo_devices", [["switch_id", "Switch id (used by fans)"], ["host", "Plug IP"]], { switch_id: `tapo-${sw.tapo_devices.length + 1}`, host: "" })}
       </>)}

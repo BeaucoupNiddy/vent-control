@@ -183,6 +183,45 @@ function SensorEditor({ cfg, change }: { cfg: Json; change: Change }) {
   </>);
 }
 
+const PLUG_NAMES = ["exterior-fan", "circ-fan-1", "circ-fan-2"];
+
+function PlugFinder({ devs, change }: { devs: Json[]; change: Change }) {
+  const [found, setFound] = useState<Json[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const find = async () => {
+    setBusy(true); setErr("");
+    try { setFound((await api.discoverTapo()).plugs); } catch (e) { setErr(String((e as Error).message)); }
+    setBusy(false);
+  };
+  const hosts = devs.map((d) => d.host);
+  const add = (p: Json) => {
+    const used = devs.map((d) => d.switch_id);
+    const id = PLUG_NAMES.find((n) => !used.includes(n)) ?? `plug-${devs.length + 1}`;
+    change("switches.tapo_devices", [...devs, { switch_id: id, host: p.host }]);
+  };
+  return (<>
+    <div className="row" style={{ marginBottom: 8 }}>
+      <button className="btn" onClick={find} disabled={busy}>{busy ? "Searching…" : "Find plugs on my Wi-Fi"}</button>
+      {err && <span className="error">{err}</span>}
+    </div>
+    {found && found.length === 0 && <p className="note">No plugs answered. Check they're plugged in and on the same Wi-Fi as this computer, then try again.</p>}
+    {found && found.length > 0 && (<>
+      <div className="table-wrap"><table>
+        <thead><tr><th>Found</th><th>Address</th><th>Now</th><th /></tr></thead>
+        <tbody>{found.map((p) => (
+          <tr key={p.host} className={hosts.includes(p.host) ? "" : "su-new"}>
+            <td>{p.model ?? "plug"}{p.name ? ` · ${p.name}` : ""} <span className="faint">{p.mac ?? ""}</span></td>
+            <td className="num">{p.host}</td>
+            <td>{p.error ? <span className="error">{p.error}</span> : p.on ? "on" : "off"}</td>
+            <td>{hosts.includes(p.host) ? <span className="faint">added</span> : <button className="btn primary" onClick={() => add(p)}>Add</button>}</td>
+          </tr>))}</tbody>
+      </table></div>
+      <p className="faint">Not sure which plug is which? Press the button on one plug, then search again: the one whose on/off changed is that plug.</p>
+    </>)}
+  </>);
+}
+
 function PlugEditor({ cfg, change }: { cfg: Json; change: Change }) {
   const sw = cfg.switches;
   const devs: Json[] = sw.tapo_devices;
@@ -199,11 +238,13 @@ function PlugEditor({ cfg, change }: { cfg: Json; change: Change }) {
         <select value={sw.provider} onChange={(e) => change("switches.provider", e.target.value)}>
           <option value="mock">Simulated (demo)</option><option value="tapo">TP-Link Tapo</option><option value="shelly">Shelly</option><option value="homeassistant">Home Assistant</option>
         </select></div>
-      {sw.provider === "tapo" && <Text cfg={cfg} path="switches.tapo_username" label="TP-Link account email" change={change} />}
-      {sw.provider === "tapo" && <Text cfg={cfg} path="switches.tapo_password" label="TP-Link password" password change={change} />}
+      {sw.provider === "tapo" && <Text cfg={cfg} path="switches.tapo_username" label="TP-Link account email (usually leave empty)" change={change}
+        hint="Only needed if you added the plugs in the Tapo app. Plugs set up with Apple Home need no account." />}
+      {sw.provider === "tapo" && sw.tapo_username && <Text cfg={cfg} path="switches.tapo_password" label="TP-Link password" password change={change} />}
     </div>
     {sw.provider === "tapo" && (<>
       <h3 className="su-h3">Plugs</h3>
+      <PlugFinder devs={devs} change={change} />
       <div className="table-wrap"><table>
         <thead><tr><th>Plug name</th><th>Address</th><th /></tr></thead>
         <tbody>{devs.map((d, i) => (
@@ -213,7 +254,7 @@ function PlugEditor({ cfg, change }: { cfg: Json; change: Change }) {
             <td><button className="btn" onClick={() => change("switches.tapo_devices", devs.filter((_, j) => j !== i))}>Remove</button></td>
           </tr>))}</tbody>
       </table></div>
-      <button className="btn" style={{ marginTop: 6 }} onClick={() => change("switches.tapo_devices", [...devs, { switch_id: ["exterior-fan", "circ-fan-1", "circ-fan-2"][devs.length] ?? `plug-${devs.length + 1}`, host: "" }])}>Add plug</button>
+      <button className="btn" style={{ marginTop: 6 }} onClick={() => change("switches.tapo_devices", [...devs, { switch_id: PLUG_NAMES[devs.length] ?? `plug-${devs.length + 1}`, host: "" }])}>Add plug</button>
       <h3 className="su-h3">Which plug powers which fan?</h3>
       <div className="form">
         {cfg.fans.map((f: Json, i: number) => <div className="field" key={f.id}><label>{f.name}</label>{plugSelect(`fans.${i}.switch_id`, f.switch_id)}</div>)}
