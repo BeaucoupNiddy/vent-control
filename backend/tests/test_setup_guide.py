@@ -70,7 +70,8 @@ def test_sensor_and_plug_checks():
     assert ch["probe"]["status"] == "fail"  # no concrete probe and no estimate
     assert "ecowitt:ch2" in ch["unmapped"]["label"]
     _, ch = checks(r, "plugs")
-    assert ch["creds"]["status"] == "fail" and ch["dupe"]["status"] == "fail"
+    assert ch["creds"]["status"] == "ok"  # no TP-Link account needed for Matter-only plugs
+    assert ch["dupe"]["status"] == "fail"
     assert any(k.startswith("assign-") and v["status"] == "fail" for k, v in ch.items())  # still mock-plug ids
     _, ch = checks(r, "gateway")
     assert ch["reach"]["status"] == "ok"
@@ -85,3 +86,12 @@ def test_gas_appliance_needs_interlock():
     cfg.control.combustion_interlock = True
     _, ch = checks(setup_guide.evaluate(cfg, {"hardware": {}}, p), "safety")
     assert ch["gas_appliance"]["status"] == "warn"
+
+
+def test_tapo_email_without_password_fails():
+    cfg = example_config()
+    cfg.switches.provider = "tapo"
+    cfg.switches.tapo_username = "me@example.com"
+    r = setup_guide.evaluate(cfg, {"sensors": [], "hardware": {}, "alerts": []}, setup_guide.empty_progress(), {})
+    _, ch = checks(r, "plugs")
+    assert ch["creds"]["status"] == "fail"

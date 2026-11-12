@@ -364,3 +364,32 @@ def test_ecowitt_push_endpoint_and_discovery(tmp_path):
         d = c.get("/api/sensors/discover").json()
         assert {"ecowitt:outdoor", "ecowitt:ch1", "ecowitt:tf1"} <= {x["id"] for x in d["channels"]}
         assert c.get("/api/status").json()["data_source"] == "measured"
+
+
+def test_tapo_discover_lists_plugs_without_switching(monkeypatch):
+    from kasa import AuthenticationError
+    from ventctl.hardware import tapo as tapo_mod
+
+    class Dev:
+        def __init__(self, ok):
+            self.ok, self.model, self.mac, self.alias, self.is_on, self.switched = ok, "P125M", "AA:BB", None, True, False
+
+        async def update(self):
+            if not self.ok:
+                raise AuthenticationError("bound")
+
+        async def disconnect(self):
+            pass
+
+    calls = {}
+
+    async def fake_discover(credentials=None, discovery_timeout=5):
+        calls["creds"] = credentials
+        return {"192.168.1.21": Dev(True), "192.168.1.20": Dev(False)}
+
+    monkeypatch.setattr(tapo_mod.Discover, "discover", staticmethod(fake_discover))
+    plugs = asyncio.run(tapo_mod.discover_plugs())
+    assert calls["creds"] is None  # no account
+    assert [p["host"] for p in plugs] == ["192.168.1.20", "192.168.1.21"]
+    assert plugs[1]["model"] == "P125M" and plugs[1]["on"] is True and plugs[1]["error"] is None
+    assert "TP-Link account" in plugs[0]["error"]

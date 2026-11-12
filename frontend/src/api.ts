@@ -39,6 +39,7 @@ export const api = {
   replay: (range: string, start?: string, end?: string) => req("POST", "/api/replay", { range, start, end }),
   discover: () => req("GET", "/api/sensors/discover"),
   sensorsRaw: () => req("GET", "/api/sensors/raw"),
+  discoverTapo: () => req("GET", "/api/switches/discover-tapo"),
   switchTest: (host: string, channel = 0) => req("POST", "/api/switches/test", { host, channel }),
   calibration: (range: string) => req("GET", `/api/calibration?range=${range}`),
   applyCalibration: (body: Json) => req("POST", "/api/calibration/apply", body),

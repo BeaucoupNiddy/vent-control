@@ -400,8 +400,8 @@ class SwitchSettings(BaseModel):
                     "the fans should stay on, so if this computer stops the plug turns itself off.")
     shelly_devices: list[ShellyDevice] = Field(default_factory=list)
     tapo_devices: list[TapoDevice] = Field(default_factory=list)
-    tapo_username: str = Field("", description="TP-Link account email (used only for the local handshake)")
-    tapo_password: str = Field("", description="TP-Link account password (stored only in the local database)")
+    tapo_username: str = Field("", description="TP-Link account email. Leave empty for plugs never added in the Tapo app (e.g. set up via Matter); only used for the local handshake")
+    tapo_password: str = Field("", description="TP-Link account password, only if the email is set (stored only in the local database)")
     timeout_s: float = Field(4, ge=0.5, le=30)
 
 

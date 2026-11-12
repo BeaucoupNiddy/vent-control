@@ -150,8 +150,8 @@ def check_install(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[di
          "wall, not the air. Low on an outside wall, about 1 ft above the floor."),
         ("inst_fan", "The Tjernlund fan is mounted in the foundation vent, blowing out",
          "Follow Tjernlund's instructions. Seal round the housing so air doesn't loop back."),
-        ("inst_plugs", "Each fan is plugged into its own Tapo plug, and each plug is added in the Tapo app",
-         "Tapo app → + → Plug → P125M. Name each plug after its fan, then write its address on the worksheet."),
+        ("inst_plugs", "Each fan is plugged into its own Tapo plug, and each plug is on your Wi-Fi",
+         "Join each plug to Wi-Fi with Apple Home (no TP-Link account needed) or the Tapo app, then press 'Find plugs' on the plugs step."),
         ("inst_circ", "The two Honeywell fans are set up, speed chosen, power switch left ON",
          "Off the floor, pointed along the path on the worksheet. The plug does the switching."),
     ]
@@ -325,11 +325,15 @@ def check_plugs(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[dict
                    "Choose 'TP-Link Tapo' below and save.")]
     out.append(_c("provider", "ok", f"Plug type: {sw.provider}"))
     if sw.provider == "tapo":
-        if not sw.tapo_username or not sw.tapo_password:
-            out.append(_c("creds", "fail", "TP-Link email or password is empty",
-                          "Use the same login as the Tapo app. It stays on this computer."))
-        else:
+        if sw.tapo_username and not sw.tapo_password:
+            out.append(_c("creds", "fail", "TP-Link email entered without a password",
+                          "Enter the password too, or clear the email if the plugs were set up without the Tapo app."))
+        elif sw.tapo_username:
             out.append(_c("creds", "ok", "TP-Link login entered"))
+        else:
+            out.append(_c("creds", "ok", "No TP-Link account used",
+                          "Fine for plugs set up through Matter (e.g. Apple Home). Plugs added in the Tapo app "
+                          "need that account's email and password here."))
         devs = sw.tapo_devices
         if not devs:
             out.append(_c("devices", "fail", "No plugs added", "Add one row per plug with its address."))
@@ -337,7 +341,7 @@ def check_plugs(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[dict
         for d in devs:
             if not _valid_host(d.host):
                 out.append(_c(f"host-{d.switch_id}", "fail", f"Plug '{d.switch_id}' has no valid address",
-                              "Find it in the Tapo app: plug → settings (gear) → Device info → IP address."))
+                              "Press 'Find plugs' on this step, or look in your router's device list."))
         if len(hosts) != len(set(hosts)):
             out.append(_c("dupe", "fail", "Two plugs have the same address"))
     known = set(_plug_ids(cfg)) if sw.provider in ("tapo", "shelly") else None
