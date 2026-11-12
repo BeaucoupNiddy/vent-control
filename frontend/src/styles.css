@@ -237,3 +237,18 @@ pre { white-space: pre-wrap; word-break: break-word; font-size: 11px; background
 .zone-card .kv { margin-top: 6px; }
 ul.plain { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4px; }
 .update-info .label { display: block; color: var(--text-2); font-size: 12px; margin-bottom: 2px; }
+
+/* Ask (plain-language explainer chat) */
+.ask .ask-model { margin-top: 12px; align-items: flex-end; }
+.chat-log { display: flex; flex-direction: column; gap: 10px; max-height: 60vh; overflow-y: auto; padding: 2px; }
+.chat-msg { max-width: 85%; padding: 10px 14px; border-radius: 12px; line-height: 1.5; border: 1px solid var(--border); }
+.chat-msg p { margin: 0 0 8px; } .chat-msg p:last-child { margin-bottom: 0; }
+.chat-msg ul { margin: 0 0 8px; padding-left: 20px; }
+.chat-msg.user { align-self: flex-end; background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.chat-msg.assistant { align-self: flex-start; background: var(--surface-2); }
+.chat-msg.error { background: var(--warn-bg); }
+.chat-starters { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; }
+.chat-starters .btn { text-align: left; white-space: normal; }
+.chat-input { display: flex; gap: 8px; align-items: flex-end; margin-top: 12px; }
+.chat-input textarea { flex: 1; min-width: 0; resize: vertical; font: inherit; }
+@media (max-width: 600px) { .chat-msg { max-width: 100%; } }

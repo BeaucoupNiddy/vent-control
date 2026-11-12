@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, calibration, climate, reports, setup_guide, simulation, updater, weather
+from . import analysis, calibration, climate, explainer, reports, setup_guide, simulation, updater, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -134,6 +134,21 @@ class SetupChange(BaseModel):
     answers: dict | None = None
     mark: dict | None = None  # {"step": id, "state": "done" | "skipped" | None}
     finished: bool = False
+
+
+class ChatSettings(BaseModel):
+    api_key: str | None = None  # "" removes the saved key
+    model: str | None = None
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class ChatRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str | None = None
 
 
 class CalcRequest(BaseModel):
@@ -638,6 +653,53 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     async def reset_setup():
         ctrl().storage.set_kv(setup_guide.PROGRESS_KEY, setup_guide.empty_progress())
         return await setup_state(False)
+
+    # ------------------------------------------------------------ plain-language explainer (read-only)
+    keys = explainer.KeyStore(Path(db_path).resolve().parent)
+
+    def chat_context() -> str:
+        c = ctrl()
+        now = c.clock.now()
+        rows = state["storage"].history(now - timedelta(hours=6), now, max_points=10**6)
+        return explainer.build_context(c.status(), c.config.model_dump(mode="json"),
+                                       state["storage"].events(30), explainer.recent_history(rows, tz()), tz())
+
+    @app.get("/api/chat/settings")
+    def chat_settings():
+        return keys.public()
+
+    @app.put("/api/chat/settings")
+    def put_chat_settings(req: ChatSettings):
+        keys.update(req.api_key, req.model)
+        return keys.public()
+
+    @app.get("/api/chat/models")
+    async def chat_models():
+        try:
+            return {"models": await explainer.list_models()}
+        except explainer.OpenRouterError as e:
+            raise HTTPException(502, str(e))
+
+    @app.get("/api/chat/context")
+    def chat_context_preview():
+        """Exactly what the model is shown (secrets hidden), for transparency."""
+        return PlainTextResponse(explainer.system_prompt(chat_context(), ctrl().clock.now(), tz()))
+
+    @app.post("/api/chat")
+    async def chat(req: ChatRequest):
+        key = keys.key()
+        if not key:
+            raise HTTPException(400, "Paste your OpenRouter API key first.")
+        if not req.messages or req.messages[-1].role != "user":
+            raise HTTPException(400, "Ask a question first.")
+        model = req.model or keys.model()
+        if req.model and req.model != keys.model():
+            keys.update(model=req.model)
+        system = explainer.system_prompt(chat_context(), ctrl().clock.now(), tz())
+        try:
+            return await explainer.chat(key, model, system, [m.model_dump() for m in req.messages])
+        except explainer.OpenRouterError as e:
+            raise HTTPException(502, str(e))
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):

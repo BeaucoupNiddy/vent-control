@@ -73,6 +73,10 @@ export const api = {
   setup: (probe = true) => req("GET", `/api/setup?probe=${probe}`),
   setupProgress: (body: Json) => req("PUT", "/api/setup/progress", body),
   setupReset: () => req("POST", "/api/setup/reset"),
+  chatSettings: () => req("GET", "/api/chat/settings"),
+  saveChatSettings: (body: { api_key?: string; model?: string }) => req("PUT", "/api/chat/settings", body),
+  chatModels: () => req("GET", "/api/chat/models"),
+  chat: (messages: { role: string; content: string }[], model?: string) => req("POST", "/api/chat", { messages, model }),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),
