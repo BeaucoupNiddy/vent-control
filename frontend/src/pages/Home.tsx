@@ -82,6 +82,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const [stats, setStats] = useState<Json>(null);
   const [targets, setTargets] = useState<Targets>(DEFAULT_TARGETS);
   const [dpOnF, setDpOnF] = useState(3);
+  const [dpOffF, setDpOffF] = useState(1);
   const [week, setWeek] = useState<Pt[] | null>(null);
   const [range, setRangeState] = useState<string>(() => {
     try { return localStorage.getItem("ventctl.homeRange") || "24h"; } catch { return "24h"; }
@@ -98,6 +99,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       const ctl = c && c.control;
       if (ctl) setTargets({ target: ctl.target_rh_pct, upper: ctl.upper_rh_pct, high: ctl.high_rh_alert_pct });
       if (ctl && ctl.dewpoint_on_advantage_f != null) setDpOnF(ctl.dewpoint_on_advantage_f);
+      if (ctl && ctl.dewpoint_off_advantage_f != null) setDpOffF(ctl.dewpoint_off_advantage_f);
     }).catch(() => {});
     const load = () => {
       api.stats("24h").then(setStats).catch(() => {});
@@ -242,7 +244,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
           <dl className="hs-facts">
             <div>
               <dt>Outside air</dt>
-              <dd className={advF == null ? "" : advF >= dpOnF ? "good" : advF > 0 ? "ok" : "warn"}>
+              <dd className={advF == null ? "" : advF >= dpOnF || (anyOn && advF > dpOffF) ? "good" : advF > 0 ? "ok" : "warn"}>
                 {advF == null ? "—" : advF > 0 ? `${dDeg(advF, u, false)} drier` : advF < 0 ? `${dDeg(-advF, u, false)} wetter` : "Same as inside"}
               </dd>
             </div>
@@ -266,9 +268,9 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
         <Tile icon="thermo" label="Dew point" tone="ok" value={temp(main && main.dew_point_c, u, 0)}
           sub={feelWord(cToF(main && main.dew_point_c))}
           viz={<Sparkline values={day.map((p) => tempVal(p.avg_td != null ? p.avg_td : p.in_td, u))} tone="ok" />} />
-        <Tile icon="wind" label="Drying power" tone={advF == null ? "idle" : advF >= dpOnF ? "good" : advF > 0 ? "ok" : "warn"}
-          value={dDeg(advF, u)} title="Basement dew point minus outside dew point. Positive means outside air is drier."
-          sub={advF == null ? "Needs an outdoor reading" : advF >= dpOnF ? "Outside is drier: fans help" : advF > 0 ? "Slightly drier outside" : "Outside is wetter"}
+        <Tile icon="wind" label="Drying power" tone={advF == null ? "idle" : advF >= dpOnF || (anyOn && advF > dpOffF) ? "good" : advF > 0 ? "ok" : "warn"}
+          value={dDeg(advF, u)} title={`Basement dew point minus outside dew point. Positive means outside air is drier. Fans start at ${dDeg(dpOnF, u, false)} and keep running until the gap shrinks to ${dDeg(dpOffF, u, false)}.`}
+          sub={advF == null ? "Needs an outdoor reading" : anyOn && advF > 0 ? `Fans run until the gap is ${dDeg(dpOffF, u, false)}` : advF >= dpOnF ? "Outside is drier: fans help" : advF > 0 ? `Fans start at ${dDeg(dpOnF, u, false)} drier` : "Outside is wetter"}
           viz={<Sparkline values={day.map((p) => (p.gapF == null ? null : u === "F" ? p.gapF : (p.gapF * 5) / 9))} tone={advF != null && advF > 0 ? "good" : "warn"} refY={0} />} />
         <Tile icon="bucket" label="Water removed" tone="ok"
           value={water == null ? "—" : `${Math.abs(water).toFixed(1)} gal`}

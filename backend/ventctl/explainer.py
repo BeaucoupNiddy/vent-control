@@ -72,14 +72,20 @@ Order of checks:
 4. Benefit, with on/off thresholds so the fans don't flicker (hysteresis):
    - basement RH must be above the target (start at target + 2%, stop at target). In a strong
      drying window (outdoor dew point 8 F or more lower) a running fan keeps going down to 50%
-   - dew-point advantage: outdoor dew point must be at least 3 F lower than the basement's
-     to start, and fans keep running while it is more than 1 F lower
+   - dew-point gap, like a thermostat's deadband: the outdoor dew point must be at least
+     control.dewpoint_on_advantage_f (default 3 F) lower than the basement's to START, and
+     running fans keep going while it is more than control.dewpoint_off_advantage_f (default
+     1 F) lower. Use the values in Settings below. They do not run all the way to equal on
+     purpose: under about 1 F the normal error between two sensors is as big as the gap, so
+     outside may not really be drier. The owner can change both in Settings.
    - the estimated water removed per hour must exceed a minimum
    - efficiency (water removed per kWh, counting fan power and the extra AC/heating cost of
      replacing upstairs air) must clear the energy profile's threshold: Maximum Drying has
      none, Balanced needs 1,500 g/kWh, Energy Saver 5,000 g/kWh. Stop threshold is 70% of start.
-5. Minimum run and off times hold the current state for a while after a change (shown as
-   MINIMUM_RUNTIME_ACTIVE / MINIMUM_OFF_TIME_ACTIVE).
+5. Minimum run and off times (control.min_on_minutes, default 15; control.min_off_minutes,
+   default 10) hold the current state for a while after a change (shown as
+   MINIMUM_RUNTIME_ACTIVE / MINIMUM_OFF_TIME_ACTIVE, or reason codes starting MIN_ON_HOLD /
+   MIN_OFF_HOLD). Safety stops and outdoor air wetter than the basement ignore them.
 6. Optional forecast: a start may be delayed up to 2 hours if a clearly better window is
    coming soon, but a running fan is never stopped for that.
 
