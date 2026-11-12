@@ -383,7 +383,7 @@ def test_tapo_discover_lists_plugs_without_switching(monkeypatch):
 
     calls = {}
 
-    async def fake_discover(credentials=None, discovery_timeout=5):
+    async def fake_discover(credentials=None, discovery_timeout=5, on_unsupported=None):
         calls["creds"] = credentials
         return {"192.168.1.21": Dev(True), "192.168.1.20": Dev(False)}
 
@@ -393,3 +393,72 @@ def test_tapo_discover_lists_plugs_without_switching(monkeypatch):
     assert [p["host"] for p in plugs] == ["192.168.1.20", "192.168.1.21"]
     assert plugs[1]["model"] == "P125M" and plugs[1]["on"] is True and plugs[1]["error"] is None
     assert "TP-Link account" in plugs[0]["error"]
+
+
+class StaleAutoOff:
+    """Like python-kasa's AutoOff: each setter re-sends the other field from cached data."""
+
+    def __init__(self):
+        self.device = {"delay_min": 120, "enable": False}
+        self.data = dict(self.device)
+
+    @property
+    def enabled(self):
+        return self.data["enable"]
+
+    @property
+    def delay(self):
+        return self.data["delay_min"]
+
+    async def set_enabled(self, e):
+        self.device = {"enable": e, "delay_min": self.data["delay_min"]}
+
+    async def set_delay(self, d):
+        self.device = {"delay_min": d, "enable": self.data["enable"]}
+
+
+class StaleFirmware:
+    def __init__(self):
+        self.auto_update_enabled = True
+
+    async def set_auto_update_enabled(self, e):
+        self.auto_update_enabled = e
+
+
+class StaleDev:
+    def __init__(self):
+        from kasa import Module
+        self.auto_off, self.fw = StaleAutoOff(), StaleFirmware()
+        self.modules = {Module.AutoOff: self.auto_off, Module.Firmware: self.fw}
+        self.is_on = False
+
+    async def update(self):
+        self.auto_off.data = dict(self.auto_off.device)
+
+
+def test_tapo_auto_off_keeps_both_delay_and_enable_and_blocks_firmware_updates():
+    from ventctl.config import TapoDevice
+    from ventctl.hardware.tapo import TapoSwitches
+    dev = StaleDev()
+
+    async def connect(host):
+        return dev
+    sw = TapoSwitches([TapoDevice(switch_id="t", host="10.0.0.9")], ManualClock(T0), "", "",
+                      auto_off_minutes=30, connector=connect)
+    asyncio.run(sw.get("t"))
+    assert dev.auto_off.device == {"delay_min": 30, "enable": True}
+    assert sw.watchdog["t"] == "active"
+    assert dev.fw.auto_update_enabled is False and sw.firmware_updates["t"] == "off"
+
+
+def test_tapo_tpap_firmware_gets_a_plain_explanation():
+    from kasa import UnsupportedDeviceError
+    from ventctl.config import TapoDevice
+    from ventctl.hardware.tapo import TapoSwitches
+
+    async def connect(host):
+        raise UnsupportedDeviceError("Unsupported device 10.0.0.9 of type SMART.TAPOPLUG with encrypt_scheme "
+                                     "EncryptionScheme(encrypt_type='TPAP')")
+    sw = TapoSwitches([TapoDevice(switch_id="t", host="10.0.0.9")], ManualClock(T0), "", "", connector=connect)
+    st = asyncio.run(sw.get("t"))
+    assert not st.reachable and "TPAP" in st.error and "spare plug" in st.error

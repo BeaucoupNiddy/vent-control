@@ -117,10 +117,11 @@ You'll use three: one for the exterior fan and one for each circulation fan.
 1. Plug the P125M in. Its light should blink (if it doesn't, hold its button about 5 seconds to reset it).
 2. On your iPhone, open the **Home** app: **+ → Add Accessory**, and scan the Matter code on the plug or on its box. Choose your Wi-Fi when asked. The phone must be on the same Wi-Fi as the Mac.
 3. Do this for each plug. You don't need to name them in the Home app; the controller app has its own names.
-4. Leave the plugs' own schedules and timers off, and don't add automations for them in the Home app. The controller app sets each plug's auto-off timer itself, as a safety backstop.
-5. Plug each fan into its plug and the plug into a GFCI outlet.
-6. Later, in the controller app's setup (step 7 of section 5), press **Find plugs on my Wi-Fi**. It lists each plug with its address; press **Add** on each one. To tell them apart, press the button on one plug and search again: the one that changed on/off is that plug.
-7. Optional but recommended: in your router app, **reserve** each plug's address so it never changes. Write the address and MAC on the worksheet.
+4. Add each new plug to the controller app soon after it joins Wi-Fi. The app turns off the plug's automatic firmware updates, because newer TP-Link firmware stops other apps from controlling the plug.
+5. Leave the plugs' own schedules and timers off, and don't add automations for them in the Home app. The controller app sets each plug's auto-off timer itself, as a safety backstop.
+6. Plug each fan into its plug and the plug into a GFCI outlet.
+7. In the controller app's setup (step 7 of section 5), press **Find plugs on my Wi-Fi**. It lists each plug with its address; press **Add** on each one. To tell them apart, press the button on one plug and search again: the one that changed on/off is that plug.
+8. Optional but recommended: in your router app, **reserve** each plug's address so it never changes. Write the address and MAC on the worksheet.
 
 *Already added a plug in the Tapo app?* That's fine too. The app then needs the email and password of that TP-Link account in step 7, and in the Tapo app turn on **Me → Third-Party Services → Third-Party Compatibility** if you see it. To go account-free instead, remove the plug in the Tapo app, reset it (hold the button about 5 seconds), and add it with the Home app as above.
 
@@ -182,7 +183,7 @@ Tips for the trickier steps:
 |---|---|
 | "Can't reach the gateway" | Check the address hasn't changed (router app), the Mac is on the same Wi-Fi, and the gateway's light is normal. Open `http://<gateway address>` in a browser on the Mac: it should show the gateway's page. |
 | A sensor shows "no fresh reading" | Batteries, distance from the gateway, or the channel changed. Check it reports in the Ecowitt app. |
-| A plug "isn't answering" | Press **Find plugs on my Wi-Fi** again: its address may have changed (reserve it in the router). If it says the plug is linked to a TP-Link account, either enter that account's email and password or reset the plug and add it with the Home app. A Tapo firmware update can break local control: update the app (it updates its plug library), or ask for help switching the plug to Home Assistant/Matter. |
+| A plug "isn't answering" | Press **Find plugs on my Wi-Fi** again: its address may have changed (reserve it in the router). If it says the plug is linked to a TP-Link account, either enter that account's email and password or reset the plug and add it with the Home app. If it says the plug **switched to TPAP security**, a TP-Link firmware update has locked the app out of that plug and it can't be undone. Swap in a spare plug: add it with the Home app, then add it in the app straight away (on first contact the app turns off the plug's automatic firmware updates). Or ask for help controlling that plug through Home Assistant/Matter. |
 | Fan doesn't start on test | Wait a full minute; check the plug turns on with its own button; for the HT-900 check its own switch is on. |
 | Fan blinks off for a second every ~15 minutes | Expected: the app re-arms the plug's safety timer while the fan should keep running. |
 | Automatic never runs the fan | Usually the outdoor air is wetter than the basement (common in New Orleans summers), or a safety block is active. The Home page and Dashboard say why. |
