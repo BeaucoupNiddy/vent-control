@@ -156,3 +156,16 @@ def test_storage_migrations_idempotent(tmp_path):
     s2 = Storage(p)
     assert s2.migrate() == 6
     assert s2.load_config().fans[0].id == "v2d"
+
+
+def test_removed_plug_alerts_clear_when_settings_change():
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    world.switch_faults["mock-plug-1"] = "unreachable"
+    run_minutes(ctrl, clock, 2)
+    assert "SWITCH_OFFLINE:mock-plug-1" in ctrl.alerts
+    new = ctrl.config.model_copy(deep=True)
+    new.fans = [f for f in new.fans if f.switch_id != "mock-plug-1"]
+    ctrl.apply_config(new)
+    assert "SWITCH_OFFLINE:mock-plug-1" not in ctrl.alerts
+    assert "mock-plug-1" not in ctrl.switch_info

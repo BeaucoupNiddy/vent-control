@@ -24,9 +24,19 @@ Hardware watchdog
 Limits
   * Power readings exist only on energy-monitoring models (P110/P110M/P115).
     The P125M mini reports none, so "unexpected power" alerts are unavailable.
-  * TP-Link firmware updates have broken local access before. If the plug
-    stops responding after an update, update python-kasa, or control the plug
-    through Matter in Home Assistant (switch provider "homeassistant").
+  * TP-Link firmware updates have broken local access before: newer P125M
+    firmware switches to TP-Link's "TPAP" security, which python-kasa cannot
+    speak yet. So on connect the adapter turns OFF the plug's automatic
+    firmware updates. A plug that already moved to TPAP is reported clearly;
+    replace it with one on older firmware, or control it through Matter in
+    Home Assistant (switch provider "homeassistant").
+
+Connecting
+  The first contact uses UDP discovery to learn the plug's protocol. After
+  that the adapter reconnects straight to the plug over HTTP with the learned
+  settings, because discovery broadcasts are sometimes lost on Wi-Fi. If
+  discovery itself gets no answer, it tries the usual Tapo plug settings
+  (KLAP, login v2) directly.
   * Check the plug's rated load against the fan motor.
 """
 
@@ -39,10 +49,20 @@ from ..config import TapoDevice
 from .base import SwitchController, SwitchStatus
 
 try:  # optional dependency; only needed when the Tapo provider is selected
-    from kasa import AuthenticationError, Credentials, Discover, KasaException, Module
+    from kasa import (AuthenticationError, Credentials, Device, DeviceConfig, Discover, KasaException, Module,
+                      UnsupportedDeviceError)
+    from kasa.deviceconfig import DeviceConnectionParameters, DeviceEncryptionType, DeviceFamily
 except ImportError:  # pragma: no cover
-    Credentials = Discover = Module = None  # type: ignore[assignment]
-    KasaException = AuthenticationError = Exception  # type: ignore[assignment,misc]
+    Credentials = Device = DeviceConfig = Discover = Module = None  # type: ignore[assignment]
+    KasaException = AuthenticationError = UnsupportedDeviceError = Exception  # type: ignore[assignment,misc]
+
+TPAP_HELP = ("This plug's firmware switched to TP-Link's newer TPAP security, which this app can't talk to yet. "
+             "Swap in a spare plug (the app keeps its firmware from updating), or control it through Home Assistant.")
+
+
+def _friendly(e: BaseException) -> str:
+    text = str(e) or type(e).__name__
+    return TPAP_HELP if "TPAP" in text else text
 
 
 async def discover_plugs(username: str = "", password: str = "", timeout: float = 5.0) -> list[dict]:
@@ -50,8 +70,17 @@ async def discover_plugs(username: str = "", password: str = "", timeout: float 
     if Discover is None:
         raise KasaException("python-kasa is not installed (pip install python-kasa)")
     creds = Credentials(username, password) if username else None
-    found = await Discover.discover(credentials=creds, discovery_timeout=max(int(timeout), 3))
-    out = []
+    unsupported: list[dict] = []
+
+    async def on_unsupported(e) -> None:
+        info = getattr(e, "discovery_result", None) or {}
+        unsupported.append({"host": getattr(e, "host", None) or info.get("ip"), "model": info.get("device_model"),
+                            "mac": (info.get("mac") or "").replace("-", ":") or None, "name": None, "on": None,
+                            "error": _friendly(e)})
+
+    found = await Discover.discover(credentials=creds, discovery_timeout=max(int(timeout), 3),
+                                    on_unsupported=on_unsupported)
+    out = [u for u in unsupported if u["host"] and u["host"] not in found]
     for host, dev in sorted(found.items()):
         row = {"host": host, "model": None, "mac": None, "name": None, "on": None, "error": None}
         try:
@@ -59,6 +88,8 @@ async def discover_plugs(username: str = "", password: str = "", timeout: float 
             row.update(model=dev.model, mac=dev.mac, name=dev.alias or None, on=bool(dev.is_on))
         except AuthenticationError:
             row["error"] = "This plug is linked to a TP-Link account: enter that email and password, or reset the plug"
+        except UnsupportedDeviceError as e:
+            row["error"] = _friendly(e)
         except (KasaException, OSError, TimeoutError) as e:
             row["error"] = str(e) or type(e).__name__
         finally:
@@ -67,7 +98,7 @@ async def discover_plugs(username: str = "", password: str = "", timeout: float 
             except Exception:  # noqa: BLE001 - best effort cleanup
                 pass
         out.append(row)
-    return out
+    return sorted(out, key=lambda r: r["host"])
 
 
 class TapoSwitches(SwitchController):
@@ -81,6 +112,8 @@ class TapoSwitches(SwitchController):
         self._conn: dict[str, object] = {}
         self._connector = connector or self._connect
         self.watchdog: dict[str, str] = {}  # switch id -> "active" | "unsupported" | error text
+        self.firmware_updates: dict[str, str] = {}  # switch id -> "off" | "unsupported" | error text
+        self._known: dict[str, object] = {}  # host -> DeviceConfig learned from a successful connect
 
     def supports_hardware_auto_off(self) -> bool:
         # unknown until each plug has been contacted; any plug without a working timer makes it False
@@ -90,7 +123,22 @@ class TapoSwitches(SwitchController):
         if Discover is None:
             raise KasaException("python-kasa is not installed (pip install python-kasa)")
         creds = Credentials(self.username, self.password) if self.username else None
-        return await Discover.discover_single(host, credentials=creds, timeout=int(self.timeout))
+        known = self._known.get(host)
+        if known is not None:
+            try:
+                return await Device.connect(config=known)
+            except (KasaException, OSError, TimeoutError):
+                self._known.pop(host, None)  # fall back to discovery below
+        try:
+            dev = await Discover.discover_single(host, credentials=creds, timeout=int(self.timeout))
+        except TimeoutError:
+            # discovery broadcasts get lost on Wi-Fi; try the usual Tapo plug settings directly
+            cfg = DeviceConfig(host=host, credentials=creds, timeout=int(self.timeout),
+                               connection_type=DeviceConnectionParameters(
+                                   DeviceFamily.SmartTapoPlug, DeviceEncryptionType.Klap, login_version=2))
+            dev = await Device.connect(config=cfg)
+        self._known[host] = dev.config
+        return dev
 
     async def _device(self, switch_id: str):
         if switch_id not in self.devices:
@@ -101,7 +149,21 @@ class TapoSwitches(SwitchController):
             await dev.update()
             self._conn[switch_id] = dev
             await self._setup_watchdog(switch_id, dev)
+            await self._block_firmware_updates(switch_id, dev)
         return dev
+
+    async def _block_firmware_updates(self, switch_id: str, dev) -> None:
+        """Turn off automatic firmware updates: a TP-Link update can end local control."""
+        mod = dev.modules.get(Module.Firmware) if Module else None
+        if mod is None or not hasattr(mod, "set_auto_update_enabled"):
+            self.firmware_updates[switch_id] = "unsupported"
+            return
+        try:
+            if mod.auto_update_enabled:
+                await mod.set_auto_update_enabled(False)
+            self.firmware_updates[switch_id] = "off"
+        except (KasaException, OSError, TimeoutError, KeyError) as e:
+            self.firmware_updates[switch_id] = f"could not turn off auto-update: {e}"
 
     async def _setup_watchdog(self, switch_id: str, dev) -> None:
         if not self.auto_off_min:
@@ -111,11 +173,14 @@ class TapoSwitches(SwitchController):
             self.watchdog[switch_id] = "unsupported"
             return
         try:
-            if mod.delay != self.auto_off_min:
-                await mod.set_delay(self.auto_off_min)
+            # enable first and refresh: set_delay re-sends the cached "enable" flag and
+            # set_enabled re-sends the cached delay, so doing both from stale data undoes one
             if not mod.enabled:
                 await mod.set_enabled(True)
-            await dev.update()
+                await dev.update()
+            if mod.delay != self.auto_off_min:
+                await mod.set_delay(self.auto_off_min)
+                await dev.update()
             self.watchdog[switch_id] = "active"
         except KasaException as e:
             self.watchdog[switch_id] = f"could not enable auto-off: {e}"
@@ -137,7 +202,7 @@ class TapoSwitches(SwitchController):
             return self._status(switch_id, dev)
         except (KasaException, OSError, TimeoutError) as e:
             self._conn.pop(switch_id, None)  # reconnect next time
-            return SwitchStatus(switch_id, None, False, error=str(e) or type(e).__name__, ts=self.clock.now())
+            return SwitchStatus(switch_id, None, False, error=_friendly(e), ts=self.clock.now())
 
     async def set(self, switch_id: str, on: bool) -> SwitchStatus:
         try:
@@ -145,7 +210,7 @@ class TapoSwitches(SwitchController):
             await (dev.turn_on() if on else dev.turn_off())
         except (KasaException, OSError, TimeoutError) as e:
             self._conn.pop(switch_id, None)
-            return SwitchStatus(switch_id, None, False, error=str(e) or type(e).__name__, ts=self.clock.now())
+            return SwitchStatus(switch_id, None, False, error=_friendly(e), ts=self.clock.now())
         return await self.get(switch_id)
 
     async def rearm(self, switch_id: str, now: datetime | None = None) -> None:

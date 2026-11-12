@@ -869,8 +869,25 @@ class Controller:
         self.config.mode = old_mode if new.mode == old_mode else new.mode
         for g in new.groups:
             self.groups.setdefault(g.id, GroupState())
+        self._forget_removed_hardware(self.clock.now())
         self.storage.save_config(self.config)
         self.storage.add_event(self.clock.now(), "config", "info", "Settings updated", "CONFIG_CHANGE")
+
+    def _forget_removed_hardware(self, now: datetime) -> None:
+        """Drop state and clear alerts for plugs and sensors that are no longer configured."""
+        plugs = set(self._switch_ids())
+        if self.config.dehumidifier.monitor_switch_id:
+            plugs.add(self.config.dehumidifier.monitor_switch_id)
+        sensors = {m.sensor_id for m in self.config.sensors.mappings if m.enabled}
+        for sid in [s for s in self.switch_info if s not in plugs]:
+            del self.switch_info[sid]
+            self._command_failures.pop(sid, None)
+        for aid in list(self.alerts):
+            kind, _, ref = aid.partition(":")
+            gone = (kind in ("SWITCH_OFFLINE", "COMMAND_FAILURE", "UNCOMMANDED_RUN") and ref not in plugs) or \
+                   (kind in ("SENSOR_OFFLINE", "BATTERY_LOW") and ref not in sensors)
+            if ref and gone:
+                self._set_alert(now, aid, False)
 
     # ------------------------------------------------------------ alerts
     def _set_alert(self, now: datetime, aid: str, active: bool, severity: str = "warning", message: str = "") -> None:
