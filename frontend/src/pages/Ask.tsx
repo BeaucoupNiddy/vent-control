@@ -2,7 +2,8 @@ import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "reac
 import { api, Json } from "../api";
 import { Card, Icon } from "../components";
 
-type Msg = { role: "user" | "assistant"; content: string; error?: boolean };
+type Msg = { role: "user" | "assistant" | "notice"; content: string; error?: boolean; usage?: string };
+type Snap = { id: string; time: string } | null;
 type Model = { id: string; name: string; context_length?: number; prompt_per_m?: number | null; completion_per_m?: number | null };
 
 /* Good, affordable families for explaining; the newest version of each found in OpenRouter's list is suggested. */
@@ -20,8 +21,25 @@ const STARTERS = [
 ];
 const CHAT_KEY = "ventctl.chat";
 
+const SNAP_KEY = "ventctl.chat.snapshot";
+
 function loadChat(): Msg[] {
   try { return JSON.parse(sessionStorage.getItem(CHAT_KEY) || "[]"); } catch { return []; }
+}
+function loadSnap(): Snap {
+  try { return JSON.parse(sessionStorage.getItem(SNAP_KEY) || "null"); } catch { return null; }
+}
+function clock(iso: string) {
+  return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+}
+/* "12,400 tokens in (11,900 reused from cache) · 210 out · $0.0041", from OpenRouter's usage report */
+function usageLine(u: Json): string | undefined {
+  if (!u?.prompt_tokens) return undefined;
+  const cached = u.prompt_tokens_details?.cached_tokens || 0;
+  const parts = [`${u.prompt_tokens.toLocaleString()} tokens in${cached ? ` (${cached.toLocaleString()} reused from cache)` : ""}`,
+    `${(u.completion_tokens || 0).toLocaleString()} out`];
+  if (typeof u.cost === "number") parts.push(`$${u.cost < 0.01 ? u.cost.toFixed(4) : u.cost.toFixed(3)}`);
+  return parts.join(" · ");
 }
 
 /* Tiny, safe formatter for the model's answers: paragraphs, bullet lists and **bold**. No HTML injection. */
@@ -56,6 +74,7 @@ export default function Ask() {
   const [filter, setFilter] = useState("");
   const [model, setModel] = useState("");
   const [msgs, setMsgs] = useState<Msg[]>(loadChat);
+  const [snap, setSnap] = useState<Snap>(loadSnap);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -66,9 +85,12 @@ export default function Ask() {
     api.chatModels().then((r) => setModels(r.models)).catch((e) => setModelsErr(String(e.message || e)));
   }, []);
   useEffect(() => {
-    try { sessionStorage.setItem(CHAT_KEY, JSON.stringify(msgs)); } catch { /* storage unavailable */ }
+    try {
+      sessionStorage.setItem(CHAT_KEY, JSON.stringify(msgs));
+      sessionStorage.setItem(SNAP_KEY, JSON.stringify(snap));
+    } catch { /* storage unavailable */ }
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [msgs, busy]);
+  }, [msgs, busy, snap]);
 
   const shown = useMemo(() => {
     const f = filter.trim().toLowerCase();
@@ -104,12 +126,22 @@ export default function Ask() {
     const next: Msg[] = [...msgs, { role: "user", content: q }];
     setMsgs(next); setInput(""); setBusy(true); setErr("");
     try {
-      const history = next.filter((m) => !m.error).map(({ role, content }) => ({ role, content }));
-      const r = await api.chat(history, model || undefined);
-      setMsgs([...next, { role: "assistant", content: r.reply || "(no answer)" }]);
+      const history = next.filter((m) => !m.error && m.role !== "notice").map(({ role, content }) => ({ role, content }));
+      const r = await api.chat(history, model || undefined, snap?.id);
+      if (r.snapshot_id && r.snapshot_id !== snap?.id) setSnap({ id: r.snapshot_id, time: r.snapshot_time });
+      setMsgs([...next, { role: "assistant", content: r.reply || "(no answer)", usage: usageLine(r.usage) }]);
     } catch (e: Json) {
       setMsgs([...next, { role: "assistant", content: String(e.message || e), error: true }]);
     } finally { setBusy(false); }
+  }
+
+  function refreshReadings() {
+    setSnap(null);
+    setMsgs([...msgs, { role: "notice", content: "Fresh readings will be taken with your next question." }]);
+  }
+  function newConversation() {
+    setMsgs([]);
+    setSnap(null);
   }
 
   const needKey = settings && (!settings.has_key || editingKey);
@@ -118,9 +150,10 @@ export default function Ask() {
     <div className="grid ask">
       <Card title={<span className="row"><Icon name="info" /> Ask why the fans are on or off</span>}>
         <p className="muted" style={{ marginTop: 0 }}>
-          Chat with an AI model about what the controller is doing. Each question sends it the current readings, the
-          controller's latest decision and reasons, the last few hours of history, recent events, your settings and a
-          plain-language summary of the rules. It can only explain: it can't turn fans on or off or change settings.
+          Chat with an AI model about what the controller is doing. Your first question takes a snapshot of the current readings,
+          the controller's latest decision and reasons, the last few hours of history, recent events, your settings and a
+          plain-language summary of the rules. Follow-up questions reuse that same snapshot, which keeps them cheaper.
+          Press Refresh readings for up-to-date numbers. It can only explain: it can't turn fans on or off or change settings.
         </p>
         {needKey ? (
           <form className="row" onSubmit={saveKey}>
@@ -163,8 +196,10 @@ export default function Ask() {
         {err && <div className="alert warning" style={{ marginTop: 8 }}><span className="icon"><Icon name="alert" /></span><div>{err}</div></div>}
       </Card>
 
-      <Card title="Conversation" right={msgs.length > 0 &&
-        <button className="btn" onClick={() => setMsgs([])} disabled={busy}>New conversation</button>}>
+      <Card title="Conversation" right={msgs.length > 0 && <span className="row">
+        {snap && <span className="faint">Readings as of {clock(snap.time)}</span>}
+        {snap && <button className="btn" onClick={refreshReadings} disabled={busy}>Refresh readings</button>}
+        <button className="btn" onClick={newConversation} disabled={busy}>New conversation</button></span>}>
         <div className="chat-log">
           {msgs.length === 0 && (
             <div className="chat-starters">
@@ -172,12 +207,15 @@ export default function Ask() {
               {STARTERS.map((s) => <button key={s} className="btn" disabled={busy || !settings?.has_key} onClick={() => send(s)}>{s}</button>)}
             </div>
           )}
-          {msgs.map((m, i) => (
-            <div key={i} className={`chat-msg ${m.role}${m.error ? " error" : ""}`}>
-              {m.role === "assistant" && !m.error ? <Formatted text={m.content} /> : <p>{m.content}</p>}
-            </div>
-          ))}
-          {busy && <div className="chat-msg assistant faint"><p>Looking at the current readings…</p></div>}
+          {msgs.map((m, i) => m.role === "notice"
+            ? <div key={i} className="chat-notice faint">{m.content}</div>
+            : (
+              <div key={i} className={`chat-msg ${m.role}${m.error ? " error" : ""}`}>
+                {m.role === "assistant" && !m.error ? <Formatted text={m.content} /> : <p>{m.content}</p>}
+                {m.usage && <div className="chat-usage faint">{m.usage}</div>}
+              </div>
+            ))}
+          {busy && <div className="chat-msg assistant faint"><p>{snap ? "Thinking…" : "Looking at the current readings…"}</p></div>}
           <div ref={endRef} />
         </div>
         <form className="chat-input" onSubmit={(e) => { e.preventDefault(); send(input); }}>
@@ -189,7 +227,7 @@ export default function Ask() {
         </form>
         <div className="faint" style={{ marginTop: 6 }}>
           Answers come from an AI model and can be wrong. The Dashboard shows the controller's own checks.{" "}
-          <a href="/api/chat/context" target="_blank" rel="noreferrer">See exactly what the model is sent</a>.
+          <a href={`/api/chat/context${snap ? `?snapshot_id=${snap.id}` : ""}`} target="_blank" rel="noreferrer">See exactly what the model is sent</a>.
         </div>
       </Card>
     </div>

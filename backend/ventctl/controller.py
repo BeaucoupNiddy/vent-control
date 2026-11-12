@@ -84,6 +84,13 @@ class SwitchInfo:
 
 
 @dataclass
+class _FanTarget:
+    """What one plug should do this tick (the group decision, or a per-fan override)."""
+    target_on: bool
+    reason_code: str
+
+
+@dataclass
 class Alert:
     id: str
     severity: str
@@ -108,6 +115,11 @@ class Controller:
     decisions: dict[str, Decision] = field(default_factory=dict)
     snapshot: Snapshot | None = None
     alerts: dict[str, Alert] = field(default_factory=dict)
+    # per-fan manual overrides: fan id -> {"state": "on" | "off", "until": iso | None}. "off" holds the fan off
+    # until set back to auto; "on" runs it until "until", still stopped by hard safety checks
+    fan_overrides: dict[str, dict] = field(default_factory=dict)
+    _tick_lock: asyncio.Lock | None = None
+    _fan_blocked: dict[str, str] = field(default_factory=dict)  # why a fan turned on by hand is held off
     dismissed_alerts: dict[str, str] = field(default_factory=dict)  # alert id -> when dismissed (hidden until it clears)
     _alerts_seen: set[str] | None = None
     last_history: datetime | None = None
@@ -152,6 +164,7 @@ class Controller:
         """Reconcile actual switch states before resuming automatic control."""
         now = self.clock.now()
         self.dismissed_alerts = dict(self.storage.get_kv("dismissed_alerts") or {})
+        self.fan_overrides = dict(self.storage.get_kv("fan_overrides") or {})
         found = {}
         turned_off = False
         for sid in self._switch_ids():
@@ -199,9 +212,17 @@ class Controller:
 
     # ------------------------------------------------------------ main tick
     async def tick(self) -> None:
+        """One decision cycle. Serialized, so the API can run one right away (e.g. after a fan toggle)."""
+        if self._tick_lock is None:
+            self._tick_lock = asyncio.Lock()
+        async with self._tick_lock:
+            await self._tick()
+
+    async def _tick(self) -> None:
         now = self.clock.now()
         cfg = self.config
         self._expire_manual(now)
+        self._expire_fan_overrides(now)
 
         readings: list[SensorReading] = []
         try:
@@ -246,7 +267,8 @@ class Controller:
 
         local = now.astimezone(ZoneInfo(cfg.system.timezone))
         local_hour = local.hour + local.minute / 60
-        dcfg = self.decision_config()
+        dcfg_all = self.decision_config()
+        dcfg = self._without_overridden_fans(dcfg_all)
         for g in cfg.groups:
             gs = self.groups.setdefault(g.id, GroupState())
             if cfg.mode != Mode.SIMULATION:
@@ -259,7 +281,8 @@ class Controller:
             _track_deferral(gs, d, now)
             prev = self.decisions.get(g.id)
             self.decisions[g.id] = d
-            await self._apply(g.id, gs, d, now)
+            forced = self._forced_on_allowed(g, cond, dcfg_all, now, local_hour, tp)
+            await self._apply(g.id, gs, d, now, forced)
             self._shadow(g, cond, gs, d, now, local_hour, tp)
             if prev is None or prev.reason_code != d.reason_code or prev.target_on != d.target_on:
                 self.storage.add_event(now, "decision", "warning" if d.safety else "info", d.explanation,
@@ -335,7 +358,10 @@ class Controller:
         ext_on = any(gs.is_on for gs in self.groups.values())
         drying = any(d.target_on and d.effect is not None and d.effect.net_removal_g_h > 0
                      for d in self.decisions.values())
-        exterior = {"on": ext_on, "drying": ext_on and drying}
+        # the exhaust fans are running because Automatic (or a schedule) chose to, not by hand
+        auto_on = cfg.mode in (Mode.AUTO, Mode.SCHEDULE) and any(
+            d.target_on and self.groups.get(gid, GroupState()).is_on for gid, d in self.decisions.items())
+        exterior = {"on": ext_on, "drying": ext_on and drying, "auto_on": auto_on}
         for c in cfg.circulators:
             st = self.circ_states.setdefault(c.id, circulation.CircState())
             if st.manual is not None and st.manual_until is not None and now >= st.manual_until:
@@ -721,14 +747,18 @@ class Controller:
             return None
         return {"minutes": (now - then[0]).total_seconds() / 60, **tamo.attribute_rh_change(then[1], cur)}
 
-    async def _apply(self, gid: str, gs: GroupState, d: Decision, now: datetime) -> None:
+    async def _apply(self, gid: str, gs: GroupState, d: Decision, now: datetime,
+                     forced: dict[str, tuple[bool, str]] | None = None) -> None:
         if self.config.mode == Mode.SIMULATION:
             if d.target_on != gs.is_on:
                 gs.is_on = d.target_on
                 gs.last_change = now
             return
         fans = [f for f in self.config.fans if f.group == gid and f.enabled]
+        group_target, group_reason = d.target_on, d.reason_code
         for f in fans:
+            target, reason = (forced or {}).get(f.id, (group_target, group_reason))
+            d = _FanTarget(target, reason)
             info = self.switch_info.setdefault(f.switch_id, SwitchInfo(f.switch_id))
             if info.confirmed == d.target_on and info.reachable and info.commanded == d.target_on:
                 continue
@@ -758,7 +788,7 @@ class Controller:
                                        "COMMAND_FAILURE", details)
                 self._command_failures[f.switch_id] = (msg, now + timedelta(minutes=COMMAND_LOCKOUT_MIN),
                                                        d.target_on)
-        on, verified = self._group_switch_state(gid)
+        on, verified = self._group_switch_state(gid)  # fans following the group (not under a manual override)
         if on != gs.is_on:
             gs.last_change = now
             if on:
@@ -814,7 +844,7 @@ class Controller:
         # unreachable: keep last confirmed value as "last known", but it is no longer verified
 
     def _group_switch_state(self, gid: str) -> tuple[bool, bool]:
-        fans = [f for f in self.config.fans if f.group == gid and f.enabled]
+        fans = [f for f in self.config.fans if f.group == gid and f.enabled and f.id not in self.fan_overrides]
         infos = [self.switch_info.get(f.switch_id) for f in fans]
         verified = all(i is not None and i.reachable and i.confirmed is not None for i in infos)
         on = any(i is not None and i.confirmed for i in infos)
@@ -826,6 +856,71 @@ class Controller:
                for i in infos):
             verified = False
         return on, verified
+
+    # ------------------------------------------------------------ per-fan overrides
+    def set_fan_override(self, fan_id: str, state: str, minutes: float | None = None, who: str = "user") -> None:
+        """state: "auto" follows the controller, "on" runs this fan for `minutes`, "off" holds it off."""
+        now = self.clock.now()
+        fan = next(f for f in self.config.fans if f.id == fan_id)
+        if state == "auto":
+            self.fan_overrides.pop(fan_id, None)
+            msg = f"{fan.name}: back to automatic"
+        elif state == "on":
+            dur = minutes or self.config.control.manual_override_minutes
+            self.fan_overrides[fan_id] = {"state": "on", "until": (now + timedelta(minutes=dur)).isoformat()}
+            msg = f"{fan.name}: manual ON for {dur:.0f} min"
+        else:
+            self.fan_overrides[fan_id] = {"state": "off", "until": None}
+            msg = f"{fan.name}: held OFF until set back to automatic"
+        self.storage.set_kv("fan_overrides", self.fan_overrides)
+        self.storage.add_event(now, "override", "info", msg, "FAN_OVERRIDE", {"by": who, "fan": fan_id, "state": state})
+
+    def _expire_fan_overrides(self, now: datetime) -> None:
+        known = {f.id for f in self.config.fans if f.enabled}
+        changed = False
+        for fid, o in list(self.fan_overrides.items()):
+            if fid not in known:
+                del self.fan_overrides[fid]
+                changed = True
+            elif o.get("until") and now >= datetime.fromisoformat(o["until"]):
+                del self.fan_overrides[fid]
+                changed = True
+                name = next((f.name for f in self.config.fans if f.id == fid), fid)
+                self.storage.add_event(now, "override", "info", f"{name}: manual run ended; back to automatic",
+                                       "FAN_OVERRIDE_EXPIRED", {"fan": fid})
+        if changed:
+            self.storage.set_kv("fan_overrides", self.fan_overrides)
+
+    def _without_overridden_fans(self, cfg: AppConfig) -> AppConfig:
+        """The group decision (and its airflow estimate) covers only the fans that follow it."""
+        if not self.fan_overrides:
+            return cfg
+        return cfg.model_copy(update={"fans": [f.model_copy(update={"enabled": False}) if f.id in self.fan_overrides
+                                               else f for f in cfg.fans]})
+
+    def _forced_on_allowed(self, g: FanGroup, cond, cfg_all: AppConfig, now: datetime, local_hour: float,
+                           tp) -> dict[str, tuple[bool, str]]:
+        """Target for each overridden fan in this group. A manual ON still obeys the hard safety checks a
+        group manual run does (plug confirmed, interlocks, condensation, temperature limits)."""
+        out: dict[str, tuple[bool, str]] = {}
+        for f in self.config.fans:
+            o = self.fan_overrides.get(f.id)
+            if f.group != g.id or not f.enabled or not o:
+                continue
+            if o["state"] == "off":
+                out[f.id] = (False, "FAN_HELD_OFF")
+                continue
+            info = self.switch_info.get(f.switch_id)
+            st = GroupState(is_on=bool(info and info.confirmed),
+                            verified=bool(info and info.reachable and info.confirmed is not None))
+            one = cfg_all.model_copy(update={"fans": [x for x in cfg_all.fans if x.id == f.id]})
+            md = decide(cond, st, one, g, now, mode=Mode.MANUAL_ON, local_hour=local_hour, thermal_params=tp)
+            out[f.id] = (md.target_on, "FAN_MANUAL_ON" if md.target_on else md.reason_code)
+            if md.target_on:
+                self._fan_blocked.pop(f.id, None)
+            else:
+                self._fan_blocked[f.id] = md.explanation
+        return out
 
     def _expire_manual(self, now: datetime) -> None:
         if self.config.mode != Mode.MANUAL_ON:
@@ -1205,10 +1300,12 @@ class Controller:
             fans = []
             for f in group_fans(self.config, g):
                 info = self.switch_info.get(f.switch_id, SwitchInfo(f.switch_id))
-                fans.append({**f.model_dump(), "switch": info.to_dict(),
+                fans.append({**f.model_dump(), "switch": info.to_dict(), "override": self.fan_overrides.get(f.id), "override_blocked": self._fan_blocked.get(f.id)
+                             if (self.fan_overrides.get(f.id) or {}).get("state") == "on" else None,
                              "running_s": (now - info.on_since).total_seconds() if info.on_since else None})
             groups.append({
-                "id": g.id, "name": g.name, "zone": g.zone, "is_on": gs.is_on, "verified": gs.verified,
+                "id": g.id, "name": g.name, "zone": g.zone,
+                "is_on": gs.is_on or any(x["switch"].get("confirmed") for x in fans), "verified": gs.verified,
                 "last_change": gs.last_change.isoformat() if gs.last_change else None,
                 "manual_until": gs.manual_until.isoformat() if gs.manual_until else None,
                 "maintenance": gs.maintenance,

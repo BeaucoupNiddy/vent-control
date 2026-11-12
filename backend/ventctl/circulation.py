@@ -334,6 +334,18 @@ def decide_circulator(
 
     # 6. exterior-ventilation support
     ext_on = bool(exterior.get("on"))
+    if cs.run_with_exhaust:
+        if exterior.get("auto_on"):
+            state.post_vent_until = now + timedelta(minutes=cs.post_ventilation_min)
+            reasons.append("RUN_WITH_EXHAUST")
+            return out(True, "RUN_WITH_EXHAUST",
+                       "ON: the exhaust fans are bringing in drier outside air, so this fan stirs the basement to "
+                       "dry damp corners and surfaces into the air being exhausted.", "beneficial", preds=preds)
+        if state.post_vent_until and now < state.post_vent_until and state.last_reason in (
+                "RUN_WITH_EXHAUST", "POST_EXHAUST_RUN"):
+            return out(True, "POST_EXHAUST_RUN",
+                       f"ON: finishing a short run after the exhaust fans stopped (until "
+                       f"{state.post_vent_until.strftime('%H:%M')}).", "uncertain", preds=preds)
     if circ.ventilation_support and cs.ventilation_support:
         path_ok = any((zones.get(k.zone_a) and zones[k.zone_a].on_ventilation_path) !=
                       (zones.get(k.zone_b) and zones[k.zone_b].on_ventilation_path) for k in conns)

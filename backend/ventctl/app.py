@@ -149,6 +149,12 @@ class ChatMessage(BaseModel):
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
     model: str | None = None
+    snapshot_id: str | None = None  # reuse this conversation's snapshot; missing or unknown takes a new one
+
+
+class FanOverride(BaseModel):
+    state: str  # "auto" | "on" | "off"
+    minutes: float | None = None
 
 
 class DismissRequest(BaseModel):
@@ -328,6 +334,20 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(502, str(e) or type(e).__name__)
         known = {d.host.strip(): d.switch_id for d in sw.tapo_devices}
         return {"plugs": [{**p, "switch_id": known.get(p["host"])} for p in plugs]}
+
+    @app.post("/api/fans/{fid}/override")
+    async def fan_override(fid: str, req: FanOverride):
+        """Switch one exhaust/intake fan by hand: on for a while, held off, or back to automatic."""
+        c = ctrl()
+        if not any(f.id == fid and f.enabled for f in c.config.fans):
+            raise HTTPException(404, "No such fan")
+        if req.state not in ("auto", "on", "off"):
+            raise HTTPException(400, "state must be auto, on or off")
+        if req.minutes is not None and not (1 <= req.minutes <= 24 * 60):
+            raise HTTPException(400, "minutes must be between 1 and 1440")
+        c.set_fan_override(fid, req.state, req.minutes)
+        await c.tick()  # act now instead of at the next decision
+        return c.status()
 
     @app.post("/api/alerts/dismiss")
     def dismiss_alerts(req: DismissRequest):
@@ -730,10 +750,20 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         except explainer.OpenRouterError as e:
             raise HTTPException(502, str(e))
 
+    snapshots = explainer.SnapshotStore()
+
+    def new_snapshot() -> explainer.Snapshot:
+        now = ctrl().clock.now()
+        return snapshots.add(explainer.system_prompt(chat_context(), now, tz()), now)
+
     @app.get("/api/chat/context")
-    def chat_context_preview():
+    def chat_context_preview(snapshot_id: str | None = None):
         """Exactly what the model is shown (secrets hidden), for transparency."""
-        return PlainTextResponse(explainer.system_prompt(chat_context(), ctrl().clock.now(), tz()))
+        snap = snapshots.get(snapshot_id) if snapshot_id else None
+        if snap is None:
+            now = ctrl().clock.now()
+            return PlainTextResponse(explainer.system_prompt(chat_context(), now, tz()))
+        return PlainTextResponse(snap.system)
 
     @app.post("/api/chat")
     async def chat(req: ChatRequest):
@@ -745,11 +775,15 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         model = req.model or keys.model()
         if req.model and req.model != keys.model():
             keys.update(model=req.model)
-        system = explainer.system_prompt(chat_context(), ctrl().clock.now(), tz())
+        # one snapshot per conversation: follow-up questions resend the identical prompt, so providers can cache it
+        snap = snapshots.get(req.snapshot_id) if req.snapshot_id else None
+        if snap is None:
+            snap = new_snapshot()
         try:
-            return await explainer.chat(key, model, system, [m.model_dump() for m in req.messages])
+            out = await explainer.chat(key, model, snap.system, [m.model_dump() for m in req.messages])
         except explainer.OpenRouterError as e:
             raise HTTPException(502, str(e))
+        return {**out, "snapshot_id": snap.id, "snapshot_time": snap.taken_at.isoformat()}
 
     @app.post("/api/calc")
     def calc(req: CalcRequest):

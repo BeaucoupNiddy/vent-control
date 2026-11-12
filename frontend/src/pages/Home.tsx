@@ -85,6 +85,53 @@ function minutesText(min: number) {
   const h = Math.floor(min / 60), m = Math.round(min % 60);
   return m ? `${h} h ${m} min` : `${h} h`;
 }
+/** "4°F lower than" / "2°F higher than" / "about the same as": outdoor dew point vs the basement's. */
+function deltaWord(inC: number, outC: number, u: string) {
+  const dF = (inC - outC) * 9 / 5;
+  const v = u === "F" ? Math.abs(dF) : Math.abs(inC - outC);
+  if (Math.abs(dF) < 0.5) return "about the same as";
+  return `${v.toFixed(u === "F" ? 0 : 1)}°${u} ${dF > 0 ? "lower than" : "higher than"}`;
+}
+
+/* ---------- one exhaust fan with its own Auto / On / Off switch ---------- */
+function FanSwitch({ f, groupSafety, nowIso, busy, act }: {
+  f: Json; groupSafety: boolean; nowIso: string; busy: string;
+  act: (key: string, fn: () => Promise<unknown>) => void;
+}) {
+  const on = !!f.switch?.confirmed;
+  const reachable = f.switch?.reachable !== false;
+  const o = f.override as { state: string; until: string | null } | null;
+  const state = o?.state || "auto";
+  const left = o?.until ? timeUntil(o.until, nowIso) : null;
+  let note: string;
+  if (!reachable) note = "Plug not responding";
+  else if (state === "off") note = "Kept off by you until you choose Auto";
+  else if (state === "on" && !on) note = `Turned on by you, but paused for safety${f.override_blocked ? `: ${String(f.override_blocked).replace(/^Fans OFF[^:]*:\s*/, "")}` : ""}`;
+  else if (state === "on") note = `On by you${left ? ` · ${left} left, then Auto` : ""}`;
+  else if (groupSafety && !on) note = "Following automatic · paused for safety";
+  else note = on ? "Following automatic · running" : "Following automatic · resting";
+  const key = (s: string) => `fan:${f.id}:${s}`;
+  return (
+    <div className={`h-fanswitch ${on ? "on" : ""}`}>
+      <FanOrb on={on} tone={on ? "good" : "idle"} size={48} />
+      <div className="h-fan-text">
+        <strong>{f.name}</strong>
+        <span className="faint">{note}</span>
+      </div>
+      <span className={`h-chip ${!reachable ? "bad" : on ? "good" : "subtle"}`}>{!reachable ? "Offline" : on ? "On" : "Off"}</span>
+      <div className="h-seg" role="radiogroup" aria-label={`${f.name} control`}>
+        {([["auto", "Auto", "Let the app decide"], ["on", "On", "Run for 1 hour, then back to Auto"], ["off", "Off", "Keep this fan off"]] as const).map(([s, label, tip]) => (
+          <button key={s} role="radio" aria-checked={state === s} title={tip}
+            className={state === s ? `active ${s}` : ""} disabled={!!busy}
+            onClick={() => act(key(s), () => api.fanOverride(f.id, s, s === "on" ? 60 : undefined))}>
+            {busy === key(s) ? "…" : label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function timeUntil(iso: string | null | undefined, nowIso: string) {
   if (!iso) return null;
   const min = (new Date(iso).getTime() - new Date(nowIso).getTime()) / 60000;
@@ -163,6 +210,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const [stats, setStats] = useState<Json>(null);
   const [hist, setHist] = useState<Json[]>([]);
   const [targets, setTargets] = useState<Targets>(DEFAULT_TARGETS);
+  const [dpOnF, setDpOnF] = useState(3);
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
 
@@ -170,6 +218,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
     api.config().then((c) => {
       const ctl = c?.control;
       if (ctl) setTargets({ target: ctl.target_rh_pct, upper: ctl.upper_rh_pct, high: ctl.high_rh_alert_pct });
+      if (ctl?.dewpoint_on_advantage_f != null) setDpOnF(ctl.dewpoint_on_advantage_f);
     }).catch(() => {});
     const load = () => {
       api.stats("24h").then(setStats).catch(() => {});
@@ -281,6 +330,17 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       </div>
       {err && <p className="error" style={{ margin: 0 }}>{err}</p>}
 
+      {/* ---------- each exhaust fan ---------- */}
+      {fans.length > 0 && (
+        <Panel icon="fan" title={fans.length > 1 ? "Exhaust fans" : "Exhaust fan"}
+          right={<span className="faint">Auto follows the app · On runs 1 hour · Off keeps it off</span>}>
+          <div className="h-fanswitches">
+            {fans.map((f) => <FanSwitch key={f.id} f={f} groupSafety={safety} nowIso={status.now} busy={busy} act={act} />)}
+          </div>
+          {sim && <p className="h-hint">Practice mode is on, so no plugs are switched, including these.</p>}
+        </Panel>
+      )}
+
       {/* ---------- notices ---------- */}
       {(status.alerts?.length > 0 || status.dismissed_alerts > 0) && (
         <Panel icon="bell" title="Things to know" className="h-notices" right={<span className="row">
@@ -312,6 +372,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
             <div>
               <div className="h-place-name">Basement</div>
               <div className="h-place-temp">{temp(ind?.t_c, u, 0)}</div>
+              <div className="h-place-dew"><HIcon name="drop" size={14} /> Dew point <strong>{temp(ind?.dew_point_c, u, 0)}</strong></div>
               <div className="h-place-sub">{r0(ind?.rh_pct)} humidity · {feelWord(ind?.dew_point_f)}</div>
             </div>
           </div>
@@ -324,10 +385,17 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
             <div>
               <div className="h-place-name">Outside</div>
               <div className="h-place-temp">{temp(out?.t_c, u, 0)}</div>
+              <div className="h-place-dew"><HIcon name="drop" size={14} /> Dew point <strong>{temp(out?.dew_point_c, u, 0)}</strong></div>
               <div className="h-place-sub">{r0(out?.rh_pct)} humidity · {feelWord(out?.dew_point_f)}</div>
             </div>
           </div>
         </div>
+        {ind?.dew_point_c != null && out?.dew_point_c != null && (
+          <p className="h-dew-gap">
+            Outside dew point is <strong>{deltaWord(ind.dew_point_c, out.dew_point_c, u)}</strong> the basement's.
+            {" "}The fans start when it is at least {u === "F" ? `${dpOnF}°F` : `${(dpOnF * 5 / 9).toFixed(1)}°C`} lower.
+          </p>
+        )}
         <p className="h-hint">
           What matters is how much water the air holds, not just the humidity number. Warm outside air at a low humidity can
           still be wetter than the basement. The app compares the two for you.
@@ -512,21 +580,8 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
         </Panel>
 
         {/* ---------- fans ---------- */}
-        <Panel icon="fan" title="Your fans" right={circs.length ? <span className="h-chip subtle">{circ.mode === "shadow" ? "Room fans: learning mode" : circ.mode === "auto" ? "Room fans: automatic" : "Room fans: off"}</span> : null}>
+        {circs.length > 0 && <Panel icon="fan" title="Room fans" right={circs.length ? <span className="h-chip subtle">{circ.mode === "shadow" ? "Room fans: learning mode" : circ.mode === "auto" ? "Room fans: automatic" : "Room fans: off"}</span> : null}>
           <ul className="h-fans">
-            {fans.map((f) => {
-              const on = !!f.switch?.confirmed;
-              return (
-                <li key={f.id}>
-                  <FanOrb on={on} tone={on ? "good" : "idle"} size={40} />
-                  <div className="h-fan-text">
-                    <strong>{f.type === "intake" ? "Fresh-air fan" : "Exhaust fan"}</strong>
-                    <span className="faint">{f.name}</span>
-                  </div>
-                  <span className={`h-chip ${!f.switch?.reachable ? "bad" : on ? "good" : "subtle"}`}>{!f.switch?.reachable ? "Not responding" : on ? "On" : "Off"}</span>
-                </li>
-              );
-            })}
             {circs.map((c) => {
               const wouldRun = c.decision?.target_on;
               return (
@@ -544,7 +599,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
           {circs.length > 0 && circ.mode === "shadow" && (
             <p className="h-hint">Room fans are in learning mode: the app works out when they would help but leaves the plugs alone. Room fans move moisture around; only the exhaust fan removes it.</p>
           )}
-        </Panel>
+        </Panel>}
       </div>
 
       <button className="h-more" onClick={() => openTab("Dashboard")}>

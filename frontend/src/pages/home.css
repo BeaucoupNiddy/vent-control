@@ -243,3 +243,30 @@
   .h-stats { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
   .h-stat-val { font-size: 22px; }
 }
+
+/* dew point on the inside/outside cards */
+.h-place-dew { display: flex; align-items: center; gap: 4px; font-size: 14px; color: var(--text-2); margin: 2px 0; }
+.h-place-dew svg { color: var(--h-blue); }
+.h-place-dew strong { color: var(--text); font-size: 15px; }
+.h-dew-gap { margin: 12px 0 0; font-size: 14px; }
+
+/* per-fan Auto / On / Off */
+.h-fanswitches { display: grid; gap: 10px; }
+.h-fanswitch { display: grid; grid-template-columns: auto 1fr auto auto; gap: 12px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--h-card); }
+.h-fanswitch.on { border-color: color-mix(in srgb, var(--h-green) 45%, var(--border)); }
+.h-fanswitch .h-fan-text { display: grid; gap: 2px; min-width: 0; }
+.h-fanswitch .h-fan-text .faint { white-space: normal; overflow: visible; }
+.h-seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.h-seg button { border: none; background: none; padding: 8px 14px; font: inherit; font-size: 14px; color: var(--text-2); cursor: pointer; min-width: 52px; }
+.h-seg button + button { border-left: 1px solid var(--border); }
+.h-seg button:hover:not(:disabled) { background: var(--surface-2); }
+.h-seg button.active { background: var(--h-blue); color: #fff; font-weight: 600; }
+.h-seg button.active.on { background: var(--h-green); }
+.h-seg button.active.off { background: var(--text-2); }
+.h-seg button:disabled { cursor: wait; }
+@media (max-width: 640px) {
+  .h-fanswitch { grid-template-columns: auto 1fr auto; }
+  .h-fanswitch .h-seg { grid-column: 1 / -1; justify-self: stretch; }
+  .h-seg button { flex: 1; }
+}

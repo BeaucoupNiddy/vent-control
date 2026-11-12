@@ -111,6 +111,7 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "circulation.rh_uncertainty_calibrated_pct", label: "Sensor RH uncertainty, after comparison (%)", step: 0.5 },
     { path: "circulation.temp_uncertainty_f", label: "Sensor temperature uncertainty (°F)", step: 0.1 },
     { path: "circulation.ventilation_support", label: "Support exterior ventilation (assigned fans)", type: "bool" },
+    { path: "circulation.run_with_exhaust", label: "Run circulation fans whenever the exhaust fans run in Automatic", type: "bool" },
     { path: "circulation.post_ventilation_min", label: "Keep running after ventilation (min)" },
     { path: "circulation.condensation_aware", label: "Condensation-aware circulation", type: "bool" },
     { path: "circulation.periodic_mixing", label: "Periodic mixing (experimental)", type: "bool" },
