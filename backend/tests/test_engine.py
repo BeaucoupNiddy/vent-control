@@ -310,3 +310,19 @@ def test_multi_room_zone_selection_and_aggregation():
     assert c.indoor.rh == pytest.approx(0.60) and "unavailable" in c.indoor_label
     c = conditions_for_group(snap, FanGroup(id="g2", name="room2", zone="room2"), cfg)
     assert c.indoor is None and "9 minutes" in c.indoor_problem
+
+
+def test_stop_gap_is_configurable_and_running_fans_ride_it_down():
+    from ventctl.units import c_to_f
+    indoor = air_f(79, 85)
+    td_in = c_to_f(indoor.dew_point_c)
+    on = GroupState(is_on=True, last_change=T0 - minutes(120))
+    off = GroupState(is_on=False, last_change=T0 - minutes(120))
+    cfg = config()
+    # 1.5 F gap: too small to start, but a running fan keeps going (default stop gap 1 F)
+    assert not decide(cond(indoor, air_f(82, td_f=td_in - 1.5)), off, cfg, cfg.groups[0], T0).target_on
+    assert decide(cond(indoor, air_f(82, td_f=td_in - 1.5)), on, cfg, cfg.groups[0], T0).target_on
+    assert not decide(cond(indoor, air_f(82, td_f=td_in - 0.8)), on, cfg, cfg.groups[0], T0).target_on
+    # a smaller stop gap keeps it running closer to equal
+    cfg = config(dewpoint_off_advantage_f=0.5)
+    assert decide(cond(indoor, air_f(82, td_f=td_in - 0.8)), on, cfg, cfg.groups[0], T0).target_on
