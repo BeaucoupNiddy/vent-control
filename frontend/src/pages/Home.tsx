@@ -398,7 +398,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
             {status.alerts.map((a: Json) => (
               <li key={a.id} className={`sev-${a.severity}`}>
                 <span className="dot" />
-                <span style={{ flex: 1 }}>{a.message.split(/(?<=\.)\s/)[0].replace(/\bRH\b/g, "humidity")}</span>
+                <span style={{ flex: 1 }}>{a.message.replace(/\.\s[\s\S]*$/, ".").replace(/\bRH\b/g, "humidity")}</span>
                 <button className="alert-x" title="Dismiss (it comes back if the problem returns)" aria-label="Dismiss"
                   onClick={() => api.dismissAlerts([a.id]).then(refresh)}><Icon name="x" size={14} /></button>
               </li>
