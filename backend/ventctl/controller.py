@@ -53,6 +53,8 @@ from .units import delta_f_to_c
 
 log = logging.getLogger("ventctl")
 COMMAND_LOCKOUT_MIN = 30
+RUN_STATE_KEY = "auto_run_state"
+RESUME_WITHIN = timedelta(minutes=5)  # an app update restarts in under a minute
 THERMAL_REFIT_H = 6
 THERMAL_CHECK_MIN = 30
 SAFETY_ALERT_CODES = {"LOCALIZED_FREEZE_RISK": "critical", "PIPE_SENSOR_UNAVAILABLE": "critical",
@@ -167,10 +169,16 @@ class Controller:
         self.fan_overrides = dict(self.storage.get_kv("fan_overrides") or {})
         found = {}
         turned_off = False
+        resume = self._resumable_groups(now)
+        resumed: set[str] = set()
         for sid in self._switch_ids():
             st = await self.switches.get(sid)
             self._record_status(st, now)
             found[sid] = st.on if st.reachable else "unreachable"
+            gid = next((f.group for f in self.config.fans if f.switch_id == sid and f.enabled), None)
+            if st.reachable and st.on and gid in resume:
+                resumed.add(gid)  # a quick restart (e.g. an app update) mid-cycle: carry on, don't reset
+                continue
             if st.reachable and st.on and self.config.mode != Mode.SIMULATION:
                 res = await self.switches.set(sid, False)
                 self._record_status(res, now, commanded=False)
@@ -178,6 +186,8 @@ class Controller:
         for g in self.config.groups:
             gs = GroupState(is_on=False, verified=True, last_change=now if turned_off else None)
             gs.is_on, gs.verified = self._group_switch_state(g.id)
+            if g.id in resumed and gs.is_on:
+                gs.last_change = resume[g.id]
             self.groups[g.id] = gs
         if self.thermal_learned is None:
             self.thermal_learned = self.storage.get_kv("thermal_model")
@@ -195,8 +205,11 @@ class Controller:
                 last_change=now if turned_off else None)
         self.storage.add_event(now, "startup", "info",
                                "Controller started; reconciled switch states" +
-                               (" and switched running fans OFF (safe startup state)" if turned_off else ""),
-                               "STARTUP_RECONCILE", {"switches_found": found, "mode": self.config.mode.value})
+                               (" and switched running fans OFF (safe startup state)" if turned_off else "") +
+                               ("; resumed the drying cycle that was running before a quick restart"
+                                if resumed else ""),
+                               "STARTUP_RECONCILE", {"switches_found": found, "mode": self.config.mode.value,
+                                                     "resumed_groups": sorted(resumed)})
         self._started = True
 
     async def run_forever(self) -> None:
@@ -794,6 +807,34 @@ class Controller:
             if on:
                 self._cycle_times.append(now)
         gs.is_on, gs.verified = on, verified
+        self._save_run_state(gid, gs, group_target, now)
+
+    def _save_run_state(self, gid: str, gs: GroupState, target_on: bool, now: datetime) -> None:
+        """Remember an automatic drying cycle, so a quick restart (an app update) can resume it."""
+        state = dict(self.storage.get_kv(RUN_STATE_KEY) or {})
+        auto = self.config.mode == Mode.AUTO and gs.is_on and bool(target_on) and gs.manual_until is None
+        prev = state.get(gid) or {}
+        if auto == bool(prev.get("auto_on")) and not auto:
+            return
+        state[gid] = {"auto_on": auto, "ts": now.isoformat(),
+                      "since": gs.last_change.isoformat() if (auto and gs.last_change) else None}
+        self.storage.set_kv(RUN_STATE_KEY, state)
+
+    def _resumable_groups(self, now: datetime) -> dict[str, datetime | None]:
+        """Groups that were running automatically moments ago. Anything else (a power cut, a crash that
+        lasted a while, manual or simulation modes) gets the safe startup: running fans are switched off."""
+        if self.config.mode != Mode.AUTO:
+            return {}
+        out: dict[str, datetime | None] = {}
+        for gid, v in (self.storage.get_kv(RUN_STATE_KEY) or {}).items():
+            try:
+                ts = datetime.fromisoformat(v["ts"])
+                if not v.get("auto_on") or not (timedelta(0) <= now - ts <= RESUME_WITHIN):
+                    continue
+                out[gid] = datetime.fromisoformat(v["since"]) if v.get("since") else None
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
 
     async def _rearm_watchdogs(self, now: datetime) -> None:
         """Keep the plugs' hardware auto-off timers from expiring while fans should run.

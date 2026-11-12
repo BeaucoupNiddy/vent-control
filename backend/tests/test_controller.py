@@ -187,3 +187,29 @@ def test_history_records_each_device():
     plug_ids = {f.switch_id for f in ctrl.config.fans if f.switch_id}
     assert plug_ids <= set(dev["plugs"])
     assert all(p["on"] in (0, 1, None) for p in dev["plugs"].values())
+
+
+def test_quick_restart_resumes_a_running_drying_cycle():
+    """An app update restarts the controller in under a minute; that must not cut a drying cycle short."""
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    force_on(ctrl, world, clock)
+    assert all(world.switch_on.get(s) for s in ("mock-plug-1", "mock-plug-2"))
+    since = ctrl.groups["main"].last_change
+    clock.set(clock.now() + timedelta(minutes=1))
+    ctrl2 = Controller(ctrl.config, store, MockSensors(world, clock), MockSwitches(world, clock), clock)
+    asyncio.run(ctrl2.startup())
+    assert all(world.switch_on.get(s) for s in ("mock-plug-1", "mock-plug-2"))
+    assert ctrl2.groups["main"].is_on and ctrl2.groups["main"].last_change == since
+    ev = store.events(kind="startup")[0]
+    assert ev["details"]["resumed_groups"] == ["main"]
+
+
+def test_long_outage_still_gets_the_safe_startup():
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    force_on(ctrl, world, clock)
+    clock.set(clock.now() + timedelta(minutes=30))  # e.g. a power cut
+    ctrl2 = Controller(ctrl.config, store, MockSensors(world, clock), MockSwitches(world, clock), clock)
+    asyncio.run(ctrl2.startup())
+    assert not any(world.switch_on.get(s) for s in ("mock-plug-1", "mock-plug-2"))

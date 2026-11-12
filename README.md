@@ -25,7 +25,7 @@ The installer adds Python 3.12 and Node with Homebrew if they're missing, builds
 - `com.ventctl` starts the controller at login and restarts it if it stops.
 - `com.ventctl.update` checks GitHub every 30 minutes. When something new is merged to `main`, it downloads it, rebuilds, runs the tests, and restarts the controller only if they pass. Otherwise it stays on the running version. The log is in `data/update.log`. To update immediately, press **Update now** in Settings, App updates (it also shows the installed version, the last result and the log), or run `deploy/update.sh --force`.
 
-So the update path is: a change is merged on GitHub, and within about 30 minutes the Mac is running it. When it restarts, the controller reads every plug and turns running fans OFF before resuming, as on any startup.
+So the update path is: a change is merged on GitHub, and within about 30 minutes the Mac is running it. When it restarts, the controller reads every plug. If the fans were in the middle of an automatic drying cycle less than 5 minutes ago, as with an update restart, it carries on with that cycle. Otherwise it turns running fans OFF before resuming.
 
 Set the Mac to never sleep and to restart after a power failure (System Settings, Energy).
 
@@ -322,7 +322,7 @@ The **Ask** tab lets you chat with an AI model through [OpenRouter](https://open
 | Sensor gateway unreachable | Same as above, plus a gateway alert |
 | Plug doesn't confirm a command | Command-failure event and alert. The group is locked out of automatic control for 30 minutes and the controller keeps trying to turn it OFF. |
 | Plug unreachable | Last known state shown separately from verified state, group marked unverified, other fans in the group turned off |
-| Startup or power restore | Reads every plug, turns anything that was ON to OFF, logs the reconciliation, then resumes |
+| Startup or power restore | Reads every plug, turns anything that was ON to OFF, logs the reconciliation, then resumes. Exception: a quick restart (under 5 minutes, in Auto) during an automatic drying cycle, such as an app update, resumes that cycle |
 | Controller computer dies | The plug's own auto-off timer stops the fan within `hardware_max_on_minutes` (30 by default). The controller re-arms it every tick while a fan should run. A dashboard alert appears if the plug has no working timer. |
 | Zone sensor fails (V3) | That zone shows as unavailable; no value is extrapolated; circulation rules that need it pause; exterior control continues |
 | Concrete probe fails (V3) | Probe predictions stop, general dew-point protection stays, alert shown |
