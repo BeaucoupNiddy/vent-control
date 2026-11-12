@@ -13,7 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import time
+from collections import OrderedDict
+from dataclasses import dataclass
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta
@@ -73,6 +76,11 @@ Order of checks:
    MINIMUM_RUNTIME_ACTIVE / MINIMUM_OFF_TIME_ACTIVE).
 6. Optional forecast: a start may be delayed up to 2 hours if a clearly better window is
    coming soon, but a running fan is never stopped for that.
+
+Weather forecast: the ONLY forecast you have is the "Weather forecast" section below. It
+comes from Open-Meteo (a free public weather service) for the latitude/longitude in the
+settings, not from the owner's own sensors, and it is a model prediction for the area, not a
+measurement. If that section says no forecast is available, say so; never make one up.
 
 Policies: "moisture" (the default, rules above) or "tamo" (temperature-aware: weighs water
 removed against cooling the basement and energy). Whichever is not active runs in "shadow",
@@ -187,10 +195,31 @@ def recent_history(rows: list[dict], tz: ZoneInfo, every_min: int = 20) -> list[
     return out
 
 
+def forecast_summary(fc: dict, config: dict, tz: ZoneInfo) -> dict:
+    """Forecast in the owner's local time and F, labeled with where it comes from."""
+    t = config.get("temperature") or {}
+    src = fc.get("source")
+    out = {"source": {"open-meteo": "Open-Meteo public weather forecast (internet)",
+                      "mock": "MOCK forecast from the practice climate model (not real weather)"}.get(src, src),
+           "location": {"latitude": t.get("forecast_latitude"), "longitude": t.get("forecast_longitude")},
+           "enabled": fc.get("enabled"),
+           "fetched_hours_ago": _r(fc.get("age_h"), 1)}
+    if not fc.get("usable"):
+        out["available"] = False
+        out["why"] = fc.get("error") or ("turned off in settings" if not fc.get("enabled") else "not fetched yet or too old")
+        return out
+    out["available"] = True
+    out["next_hours"] = [{"time": datetime.fromisoformat(h["ts"]).astimezone(tz).strftime("%a %I %p"),
+                          "temp_f": _f(h.get("t_c")), "dew_point_f": _f(h.get("dew_point_c"))}
+                         for h in fc.get("hours") or []]
+    return out
+
+
 def build_context(status: dict, config: dict, events: list[dict], history: list[dict], tz: ZoneInfo) -> str:
     keep = ("now", "mode", "policy", "energy_profile", "data_source", "simulation_mode", "groups", "sensors",
             "alerts", "zone_summary", "basement_average", "surfaces", "circulation", "forecast", "dehumidifier",
             "rh_attribution", "hardware")
+    keep = tuple(k for k in keep if k != "forecast")
     snap = {k: status.get(k) for k in keep if k in status}
     # friendly copies of the key temperatures, since the model is asked to answer in F
     for s in snap.get("sensors") or []:
@@ -206,6 +235,7 @@ def build_context(status: dict, config: dict, events: list[dict], history: list[
            if k in config}
     parts = [
         ("Controller status right now", redact(snap)),
+        ("Weather forecast", forecast_summary(status.get("forecast") or {}, config, tz)),
         ("Recent trend (last 6 hours, newest last)", history),
         ("Recent events (newest first)", ev),
         ("Settings", redact(cfg)),
@@ -224,6 +254,32 @@ def build_context(status: dict, config: dict, events: list[dict], history: list[
 def system_prompt(context: str, now: datetime, tz: ZoneInfo) -> str:
     return SYSTEM.format(rules=RULES, now=now.astimezone(tz).strftime("%A %b %d, %I:%M %p"), tz=str(tz),
                          context=context)
+
+
+# ------------------------------------------------------------------ snapshots
+@dataclass
+class Snapshot:
+    id: str
+    system: str
+    taken_at: datetime
+
+
+class SnapshotStore:
+    """Prompts frozen at the start of a conversation (in memory, newest few kept)."""
+
+    def __init__(self, keep: int = 20):
+        self.keep = keep
+        self.items: OrderedDict[str, Snapshot] = OrderedDict()
+
+    def add(self, system: str, now: datetime) -> Snapshot:
+        snap = Snapshot(secrets.token_hex(8), system, now)
+        self.items[snap.id] = snap
+        while len(self.items) > self.keep:
+            self.items.popitem(last=False)
+        return snap
+
+    def get(self, sid: str | None) -> Snapshot | None:
+        return self.items.get(sid) if sid else None
 
 
 # ------------------------------------------------------------------ OpenRouter
@@ -283,7 +339,12 @@ async def list_models() -> list[dict]:
 async def chat(key: str, model: str, system: str, messages: list[dict]) -> dict:
     msgs = [{"role": m["role"], "content": str(m["content"])[:8000]}
             for m in messages[-MAX_TURNS:] if m.get("role") in ("user", "assistant") and m.get("content")]
-    body = {"model": model, "messages": [{"role": "system", "content": system}] + msgs, "temperature": 0.3}
+    if model.startswith("anthropic/"):
+        # Anthropic only caches when asked; OpenAI, Gemini and DeepSeek cache identical prompt starts on their own
+        sys_msg = {"role": "system", "content": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]}
+    else:
+        sys_msg = {"role": "system", "content": system}
+    body = {"model": model, "messages": [sys_msg] + msgs, "temperature": 0.3, "usage": {"include": True}}
     data = await asyncio.to_thread(_http, f"{OPENROUTER}/chat/completions", key, body, 120)
     if data.get("error"):
         raise OpenRouterError(f"OpenRouter error: {data['error'].get('message', data['error'])}")
