@@ -63,11 +63,11 @@ export default function Worksheet({ cfg, progress, back, onAnswers }: { cfg: Jso
 
       <section>
         <h2>4. Smart plugs (Tapo P125M)</h2>
-        <p className="ws-note">Tapo app → plug → gear icon → Device info shows the address (IP) and MAC. Reserve each address in your router.</p>
-        <table className="ws-t ws-grid"><thead><tr><th>#</th><th>Name in Tapo app</th><th>Powers</th><th>Address (IP)</th><th>MAC</th><th>Reserved?</th></tr></thead>
+        <p className="ws-note">The setup page's "Find plugs on my Wi-Fi" shows each plug's address (IP) and MAC. Reserve each address in your router.</p>
+        <table className="ws-t ws-grid"><thead><tr><th>#</th><th>Name in this app</th><th>Powers</th><th>Address (IP)</th><th>MAC</th><th>Reserved?</th></tr></thead>
           <tbody>{PLUGS.map((n) => (
-            <tr key={n}><th>{n}</th><td>{In({ k: `p${n}_name`, ph: ["exterior-fan", "circ-fan-1", "circ-fan-2"][Number(n) - 1] ?? "spare" })}</td>
-              <td>{In({ k: `p${n}_powers`, ph: ["Tjernlund V2D", "Honeywell HT-900 #1", "Honeywell HT-900 #2"][Number(n) - 1] ?? "" })}</td>
+            <tr key={n}><th>{n}</th><td>{In({ k: `p${n}_name`, ph: ["exhaust-fan-1", "exhaust-fan-2", "circ-fan-1", "circ-fan-2"][Number(n) - 1] ?? "spare" })}</td>
+              <td>{In({ k: `p${n}_powers`, ph: ["Tjernlund exhaust #1", "Tjernlund exhaust #2", "Honeywell HT-900 #1", "Honeywell HT-900 #2"][Number(n) - 1] ?? "" })}</td>
               <td>{In({ k: `p${n}_ip`, w: 120 })}</td><td>{In({ k: `p${n}_mac`, w: 130 })}</td><td>{In({ k: `p${n}_res`, w: 50 })}</td></tr>))}
           </tbody></table>
       </section>
@@ -76,7 +76,8 @@ export default function Worksheet({ cfg, progress, back, onAnswers }: { cfg: Jso
         <h2>5. Fans</h2>
         <table className="ws-t ws-grid"><thead><tr><th>Fan</th><th>Where</th><th>Blows from → to</th><th>Speed / airflow</th><th>Watts</th></tr></thead>
           <tbody>
-            <tr><th>Tjernlund V2D (exterior)</th><td>{In({ k: "f_v2d_loc", ph: "which foundation vent" })}</td><td>{In({ k: "f_v2d_dir", ph: "basement → outside" })}</td><td>{In({ k: "f_v2d_cfm", w: 90, ph: "220 CFM" })}</td><td>{In({ k: "f_v2d_w", w: 60, ph: "40" })}</td></tr>
+            <tr><th>Tjernlund exhaust #1</th><td>{In({ k: "f_v2d_loc", ph: "which foundation vent" })}</td><td>{In({ k: "f_v2d_dir", ph: "basement → outside" })}</td><td>{In({ k: "f_v2d_cfm", w: 90, ph: "CFM" })}</td><td>{In({ k: "f_v2d_w", w: 60, ph: "W" })}</td></tr>
+            <tr><th>Tjernlund exhaust #2</th><td>{In({ k: "f_v2d2_loc", ph: "which foundation vent" })}</td><td>{In({ k: "f_v2d2_dir", ph: "basement → outside" })}</td><td>{In({ k: "f_v2d2_cfm", w: 90, ph: "CFM" })}</td><td>{In({ k: "f_v2d2_w", w: 60, ph: "W" })}</td></tr>
             <tr><th>Honeywell HT-900 #1</th><td>{In({ k: "f_c1_loc" })}</td><td>{In({ k: "f_c1_dir" })}</td><td>{In({ k: "f_c1_speed", w: 90, ph: "Low/Med/High" })}</td><td>{In({ k: "f_c1_w", w: 60 })}</td></tr>
             <tr><th>Honeywell HT-900 #2</th><td>{In({ k: "f_c2_loc" })}</td><td>{In({ k: "f_c2_dir" })}</td><td>{In({ k: "f_c2_speed", w: 90, ph: "Low/Med/High" })}</td><td>{In({ k: "f_c2_w", w: 60 })}</td></tr>
           </tbody></table>

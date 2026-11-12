@@ -19,9 +19,9 @@ Allow an afternoon for the physical work and about an hour for the app. You can 
 | Ecowitt **GW1200** gateway | 1 | Receives every sensor's radio signal and shares the readings on your Wi-Fi |
 | Ecowitt temperature + humidity sensors (WN31 / WH31) | 3 indoor + 1 outdoor | One per basement zone, one outside |
 | Ecowitt **WN30BL** probe thermometer | 1 | Measures the concrete wall's temperature, to warn before condensation |
-| **Tjernlund V2D UnderAire** | 1 | The exterior fan: pulls damp basement air out through a foundation vent (2 × 110 CFM, about 40 W) |
+| **Tjernlund UnderAire** exhaust fans | 2 | The exterior fans: pull damp basement air out through foundation vents. Each has its own plug, and the app runs them together |
 | **Honeywell HT-900** fans | 2 | Circulation fans: move air between basement areas |
-| TP-Link **Tapo P125M** smart plugs | 3 used (you have 6) | Let the app switch each fan on and off |
+| TP-Link **Tapo P125M** smart plugs | 4 used (you have 6) | Let the app switch each fan on and off |
 | Mac that stays on | 1 | Runs the controller app (already installed) |
 | AA batteries (lithium recommended outdoors), painter's tape, a small square of foam board, cable ties | | |
 
@@ -98,19 +98,19 @@ This measures the wall's surface temperature so the app can tell how close the w
 5. Mount the transmitter box higher up on the wall or a post, cable loose, away from where water could collect.
 6. Insert batteries and check it appears in the Ecowitt app. It shows a temperature only (no humidity).
 
-### 4.5 Tjernlund V2D exterior fan
+### 4.5 Tjernlund exterior fans (two)
 
-Follow Tjernlund's installation instructions for your foundation vent. Points that matter for this app:
+Follow Tjernlund's installation instructions for each foundation vent. Points that matter for this app:
 
-1. Mount it so it **exhausts**: air goes from the basement to outside.
+1. Mount each fan so it **exhausts**: air goes from the basement to outside.
 2. Seal round the housing so outside air can't loop straight back in.
 3. Leave other foundation vents as they are unless you've decided otherwise; the fan draws replacement air through the house's natural leaks.
-4. Run its cord to the outlet you planned for the **exterior-fan plug** (step 4.6). Keep the cord off the floor.
+4. Run each fan's cord to the outlet you planned for its own plug (**exhaust-fan-1**, **exhaust-fan-2**, step 4.6). Keep the cord off the floor.
 5. If there is a gas or oil water heater, furnace or boiler in the basement that vents up a chimney or metal flue, read section 5, step 10 before running the fan unattended.
 
 ### 4.6 Tapo P125M smart plugs
 
-You'll use three: one for the exterior fan and one for each circulation fan.
+You'll use four: one for each exhaust fan and one for each circulation fan. Every fan needs its own plug.
 
 **No TP-Link account needed.** The P125M is a Matter plug, so you can put it on Wi-Fi with the **Home** app on your iPhone instead of the Tapo app. A plug set up this way isn't linked to any account, and the controller app talks to it directly on your network with no login.
 
@@ -156,7 +156,7 @@ Each step has a short explanation, the settings for that step, and a **checklist
 | 5 | Sensors | Press **Add** on each new channel, name it, choose where it is and its zone, remove the simulated sensors | One outdoor sensor, an air sensor in every zone, the concrete probe, all reporting fresh readings, no unused channels, battery warnings |
 | 6 | Basement zones | Rename the zones, enter sizes, tick the zone with the exterior fan | Sizes add up to the basement, a fan zone is set, dampness shares add to 100 % |
 | 7 | Smart plugs | Choose **TP-Link Tapo**, leave the TP-Link email empty, press **Find plugs on my Wi-Fi** and **Add** each plug, choose which plug powers which fan | Valid unique addresses, every fan on its own real plug, each plug answers |
-| 8 | Exterior fan | Check the fan details (220 CFM, 40 W), press **Run 2 minutes**, listen, check outside that air blows out | Fan details, plug rated for the motor, your test |
+| 8 | Exterior fans | Check each fan's details (airflow and watts), press **Add another exhaust fan** if only one is listed, press **Run 2 minutes** (both run), listen, check outside that air blows out | Fan details, plug rated for the motor, your test |
 | 9 | Circulation fans | Set location and speed, test each, tick the three checks, press **Mark commissioned**; leave automation on **Shadow** | Speed set, your checks, commissioned, Shadow mode |
 | 10 | Safety | Answer the gas appliance question, confirm the CO alarm and that no flood vent is blocked | Gas safety block on if needed, plug safety timer on, plugs confirmed the timer |
 | 11 | Comfort targets | Review humidity target (55 %) and temperature range | Target in a sensible range |
@@ -217,10 +217,10 @@ The app's **Setup → Worksheet** is the easiest version: it saves as you type a
 
 | # | Name in the controller app | Powers | Address (IP) | MAC | Reserved? |
 |---|---|---|---|---|---|
-| 1 | exterior-fan | Tjernlund V2D | | | |
-| 2 | circ-fan-1 | HT-900 #1 | | | |
-| 3 | circ-fan-2 | HT-900 #2 | | | |
-| 4 | spare | | | | |
+| 1 | exhaust-fan-1 | Tjernlund exhaust fan #1 | | | |
+| 2 | exhaust-fan-2 | Tjernlund exhaust fan #2 | | | |
+| 3 | circ-fan-1 | HT-900 #1 | | | |
+| 4 | circ-fan-2 | HT-900 #2 | | | |
 | 5 | spare | | | | |
 | 6 | spare | | | | |
 
@@ -228,7 +228,8 @@ The app's **Setup → Worksheet** is the easiest version: it saves as you type a
 
 | Fan | Where | Blows from → to | Speed / airflow | Watts |
 |---|---|---|---|---|
-| Tjernlund V2D | | basement → outside | 220 CFM | 40 |
+| Tjernlund exhaust fan #1 | | basement → outside | | |
+| Tjernlund exhaust fan #2 | | basement → outside | | |
 | HT-900 #1 | | | | |
 | HT-900 #2 | | | | |
 

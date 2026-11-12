@@ -105,14 +105,25 @@ function Editor({ step, cfg, change, after }: { step: string; cfg: Json; change:
     case "exhaust": return (<>
       {cfg.fans.map((f: Json, i: number) => (
         <div className="form" key={f.id}>
+          {cfg.fans.length > 1 && <h3 className="su-h3" style={{ gridColumn: "1 / -1" }}>Exhaust fan {i + 1}</h3>}
           <Text cfg={cfg} path={`fans.${i}.name`} label="Fan name" change={change} />
           <div className="field"><label>Blows</label>
             <select value={f.type} onChange={(e) => change(`fans.${i}.type`, e.target.value)}><option value="exhaust">Out of the basement (exhaust)</option><option value="intake">Into the basement (intake)</option></select></div>
-          <Num cfg={cfg} path={`fans.${i}.rated_cfm`} label="Rated airflow (CFM)" change={change} hint="V2D: 2 × 110 = 220" />
+          <Num cfg={cfg} path={`fans.${i}.rated_cfm`} label="Rated airflow (CFM)" change={change} hint="One V2D box: 2 × 110 = 220" />
           <Num cfg={cfg} path={`fans.${i}.actual_cfm`} label="Installed airflow estimate (CFM)" change={change} />
-          <Num cfg={cfg} path={`fans.${i}.rated_w`} label="Power (W)" change={change} hint="V2D: about 40 W" />
+          <Num cfg={cfg} path={`fans.${i}.rated_w`} label="Power (W)" change={change} hint="One V2D box: about 40 W" />
           <Check cfg={cfg} path={`fans.${i}.motor_load_ok`} label="The plug is rated for this fan" change={change} />
+          {cfg.fans.length > 1 && <div className="field"><button className="btn" onClick={() => change("fans", cfg.fans.filter((_: Json, j: number) => j !== i))}>Remove this fan</button></div>}
         </div>))}
+      <div className="row" style={{ marginBottom: 8 }}>
+        <button className="btn" onClick={() => {
+          const last = cfg.fans[cfg.fans.length - 1] ?? {};
+          const ids = cfg.fans.map((f: Json) => f.id);
+          let n = cfg.fans.length + 1; while (ids.includes(`exhaust-${n}`)) n++;
+          change("fans", [...cfg.fans, { ...last, id: `exhaust-${n}`, name: `Exhaust fan ${n}`, switch_id: "" }]);
+        }}>Add another exhaust fan</button>
+        <span className="faint">Add one per fan that has its own plug. Both run together and their airflow adds up.</span>
+      </div>
       <TestButtons kind="exhaust" after={after} />
     </>);
     case "circulators": return <CircEditor cfg={cfg} change={change} after={after} />;
@@ -183,7 +194,7 @@ function SensorEditor({ cfg, change }: { cfg: Json; change: Change }) {
   </>);
 }
 
-const PLUG_NAMES = ["exterior-fan", "circ-fan-1", "circ-fan-2"];
+const PLUG_NAMES = ["exhaust-fan-1", "exhaust-fan-2", "circ-fan-1", "circ-fan-2"];
 
 function PlugFinder({ devs, change }: { devs: Json[]; change: Change }) {
   const [found, setFound] = useState<Json[] | null>(null);
