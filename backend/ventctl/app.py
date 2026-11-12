@@ -151,6 +151,16 @@ class ChatRequest(BaseModel):
     model: str | None = None
 
 
+class DismissRequest(BaseModel):
+    ids: list[str] | None = None  # None dismisses every current alert
+    restore: bool = False  # true shows dismissed alerts again
+
+
+class ResetRequest(BaseModel):
+    scope: str  # "all" | "since" (from a time up to now) | "before" (older than a time)
+    at: str | None = None  # ISO date/time for since/before; local time if no offset is given
+
+
 class CalcRequest(BaseModel):
     t_f: float
     rh_pct: float
@@ -318,6 +328,46 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(502, str(e) or type(e).__name__)
         known = {d.host.strip(): d.switch_id for d in sw.tapo_devices}
         return {"plugs": [{**p, "switch_id": known.get(p["host"])} for p in plugs]}
+
+    @app.post("/api/alerts/dismiss")
+    def dismiss_alerts(req: DismissRequest):
+        if req.restore:
+            ctrl().restore_alerts()
+        else:
+            n = ctrl().dismiss_alerts(req.ids)
+            state["storage"].add_event(ctrl().clock.now(), "override", "info",
+                                       f"{n} alert{'s' if n != 1 else ''} dismissed from the dashboard", "ALERTS_DISMISSED")
+        return ctrl().status()
+
+    @app.post("/api/data/reset")
+    def reset_data(req: ResetRequest):
+        """Delete recorded data (a backup of the whole database is made first)."""
+        now = ctrl().clock.now()
+        at = None
+        if req.scope in ("since", "before"):
+            if not req.at:
+                raise HTTPException(400, "Pick a date and time")
+            try:
+                at = datetime.fromisoformat(req.at)
+            except ValueError:
+                raise HTTPException(400, "That date and time isn't valid")
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=tz())
+            if at > now:
+                raise HTTPException(400, "Pick a time in the past")
+        elif req.scope != "all":
+            raise HTTPException(400, "scope must be all, since or before")
+        storage = state["storage"]
+        backup = storage.backup()
+        start, end = {"all": (None, None), "since": (at, None), "before": (None, at)}[req.scope]
+        counts = storage.delete_data(start, end)
+        if req.scope != "before":
+            ctrl().last_history = None  # write a fresh history row on the next tick
+        what = {"all": "all recorded data", "since": f"data since {at.astimezone(tz()):%b %d %I:%M %p}" if at else "",
+                "before": f"data before {at.astimezone(tz()):%b %d %I:%M %p}" if at else ""}[req.scope]
+        storage.add_event(now, "config", "warning", f"Deleted {what} ({counts['history']} readings, "
+                          f"{counts['events']} events). Backup: {Path(backup).name if backup else 'none'}", "DATA_RESET")
+        return {"deleted": counts, "backup": backup}
 
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):

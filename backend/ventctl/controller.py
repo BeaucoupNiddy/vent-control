@@ -108,6 +108,8 @@ class Controller:
     decisions: dict[str, Decision] = field(default_factory=dict)
     snapshot: Snapshot | None = None
     alerts: dict[str, Alert] = field(default_factory=dict)
+    dismissed_alerts: dict[str, str] = field(default_factory=dict)  # alert id -> when dismissed (hidden until it clears)
+    _alerts_seen: set[str] | None = None
     last_history: datetime | None = None
     previous_mode: Mode = Mode.AUTO
     _prev_ts: dict[str, datetime] = field(default_factory=dict)
@@ -149,6 +151,7 @@ class Controller:
     async def startup(self) -> None:
         """Reconcile actual switch states before resuming automatic control."""
         now = self.clock.now()
+        self.dismissed_alerts = dict(self.storage.get_kv("dismissed_alerts") or {})
         found = {}
         turned_off = False
         for sid in self._switch_ids():
@@ -891,6 +894,8 @@ class Controller:
 
     # ------------------------------------------------------------ alerts
     def _set_alert(self, now: datetime, aid: str, active: bool, severity: str = "warning", message: str = "") -> None:
+        if self._alerts_seen is not None:
+            self._alerts_seen.add(aid)
         if active and aid not in self.alerts:
             self.alerts[aid] = Alert(aid, severity, message, now)
             self.storage.add_event(now, "alert", severity, message, aid)
@@ -899,8 +904,42 @@ class Controller:
         elif not active and aid in self.alerts:
             del self.alerts[aid]
             self.storage.add_event(now, "alert", "info", f"Cleared: {aid}", aid + "_CLEARED")
+            if self.dismissed_alerts.pop(aid, None):  # it comes back if the problem returns
+                self._save_dismissed()
+
+    def _save_dismissed(self) -> None:
+        self.storage.set_kv("dismissed_alerts", self.dismissed_alerts)
+
+    def dismiss_alerts(self, ids: list[str] | None) -> int:
+        """Hide alerts from the dashboard until they clear. Safety behavior is unaffected."""
+        now = self.clock.now().isoformat()
+        targets = [a for a in self.alerts if ids is None or a in ids]
+        for aid in targets:
+            self.dismissed_alerts[aid] = now
+        self._save_dismissed()
+        return len(targets)
+
+    def restore_alerts(self) -> None:
+        self.dismissed_alerts.clear()
+        self._save_dismissed()
 
     def _update_alerts(self, now: datetime) -> None:
+        """Re-evaluate every alert. Anything not re-checked this tick (its fan, sensor, zone, probe or group
+        was removed or renamed) is stale and is cleared, so old alerts never linger."""
+        self._alerts_seen = set()
+        try:
+            self._evaluate_alerts(now)
+        finally:
+            seen, self._alerts_seen = self._alerts_seen, None
+        for aid in [a for a in self.alerts if a not in seen]:
+            self._set_alert(now, aid, False)
+        gone = [a for a in self.dismissed_alerts if a not in self.alerts]
+        for aid in gone:
+            del self.dismissed_alerts[aid]
+        if gone:
+            self._save_dismissed()
+
+    def _evaluate_alerts(self, now: datetime) -> None:
         cfg = self.config
         snap = self.snapshot
         self._set_alert(now, "GATEWAY_ERROR", bool(self._gateway_error), "critical",
@@ -1192,7 +1231,9 @@ class Controller:
             "simulation_mode": self.config.mode == Mode.SIMULATION,
             "groups": groups,
             "sensors": self.snapshot.to_dict()["readings"] if self.snapshot else [],
-            "alerts": [a.to_dict() for a in sorted(self.alerts.values(), key=lambda a: a.since, reverse=True)],
+            "alerts": [a.to_dict() for a in sorted(self.alerts.values(), key=lambda a: a.since, reverse=True)
+                       if a.id not in self.dismissed_alerts],
+            "dismissed_alerts": len([a for a in self.alerts if a in self.dismissed_alerts]),
             "clock_speed": self.clock.speed,
             "hardware": {
                 "sensor_provider": self.config.sensors.provider,

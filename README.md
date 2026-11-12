@@ -308,6 +308,12 @@ The **Ask** tab lets you chat with an AI model through [OpenRouter](https://open
 - **The key stays on this computer**, in `data/openrouter.json` (owner-only permissions, ignored by git). It is never put in the config, database, logs or exports, and the API only reports its last 4 characters. It is only sent to OpenRouter.
 - Answers can be wrong; the Dashboard's checks are what the controller actually used.
 
+## Alerts and old data
+
+- **Dismiss alerts** with the × on Home or the Dashboard, or "Dismiss all". A dismissed alert stays hidden until its problem clears, then comes back if the problem returns. Dismissing only hides it: fail-safes still act. "Show N dismissed" brings them back.
+- **Stale alerts clear themselves.** Every alert is re-checked each minute, and one whose fan, sensor, zone or probe no longer exists is cleared.
+- **Reset recorded data** (Settings): delete history, events and fan-cycle records from a point in time up to now, older than a point in time, or all of it. Settings and learned models are kept, and the whole database is first copied to `data/backups/`.
+
 ## Fail-safe behavior
 
 | Situation | What happens |

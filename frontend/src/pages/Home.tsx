@@ -3,6 +3,7 @@
 import { ReactNode, useEffect, useState } from "react";
 import { Area, AreaChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, Json } from "../api";
+import { Icon } from "../components";
 import { temp, useUnit } from "../units";
 import "./home.css";
 
@@ -281,15 +282,22 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       {err && <p className="error" style={{ margin: 0 }}>{err}</p>}
 
       {/* ---------- notices ---------- */}
-      {status.alerts?.length > 0 && (
-        <Panel icon="bell" title="Things to know" className="h-notices">
+      {(status.alerts?.length > 0 || status.dismissed_alerts > 0) && (
+        <Panel icon="bell" title="Things to know" className="h-notices" right={<span className="row">
+          {status.alerts.length > 1 && <button className="btn link" onClick={() => api.dismissAlerts().then(refresh)}>Dismiss all</button>}
+          {status.dismissed_alerts > 0 && <button className="btn link" onClick={() => api.restoreAlerts().then(refresh)}>
+            Show {status.dismissed_alerts} dismissed</button>}
+        </span>}>
           <ul className="h-list">
             {status.alerts.map((a: Json) => (
               <li key={a.id} className={`sev-${a.severity}`}>
                 <span className="dot" />
-                <span>{a.message.split(/(?<=\.)\s/)[0].replace(/\bRH\b/g, "humidity")}</span>
+                <span style={{ flex: 1 }}>{a.message.split(/(?<=\.)\s/)[0].replace(/\bRH\b/g, "humidity")}</span>
+                <button className="alert-x" title="Dismiss (it comes back if the problem returns)" aria-label="Dismiss"
+                  onClick={() => api.dismissAlerts([a.id]).then(refresh)}><Icon name="x" size={14} /></button>
               </li>
             ))}
+            {status.alerts.length === 0 && <li className="faint">All notices dismissed.</li>}
           </ul>
         </Panel>
       )}

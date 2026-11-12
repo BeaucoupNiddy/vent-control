@@ -77,6 +77,9 @@ export const api = {
   saveChatSettings: (body: { api_key?: string; model?: string }) => req("PUT", "/api/chat/settings", body),
   chatModels: () => req("GET", "/api/chat/models"),
   chat: (messages: { role: string; content: string }[], model?: string) => req("POST", "/api/chat", { messages, model }),
+  dismissAlerts: (ids?: string[]) => req("POST", "/api/alerts/dismiss", { ids }),
+  restoreAlerts: () => req("POST", "/api/alerts/dismiss", { restore: true }),
+  resetData: (scope: string, at?: string) => req("POST", "/api/data/reset", { scope, at }),
   mockState: () => req("GET", "/api/mock/state"),
   mockFault: (target: string, id: string | null, fault: string | null) =>
     req("POST", "/api/mock/fault", { target, id, fault }),

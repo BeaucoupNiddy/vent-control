@@ -13,19 +13,26 @@ const MODES = [
   { id: "simulation", label: "Simulation" },
 ];
 
-export function AlertList({ alerts }: { alerts: Json[] }) {
-  if (!alerts?.length) return null;
+export function AlertList({ alerts, hidden = 0, refresh }: { alerts: Json[]; hidden?: number; refresh?: () => void }) {
+  const act = (p: Promise<unknown>) => p.then(() => refresh?.()).catch(() => undefined);
+  if (!alerts?.length && !hidden) return null;
   return (
     <div className="grid" style={{ gap: 8 }}>
       {alerts.map((a) => (
-        <div key={a.id} className={`alert ${a.severity}`} role="alert">
+        <div key={a.id} className={`alert ${a.severity} dismissable`} role="alert">
           <span className="icon"><Icon name={a.severity === "info" ? "info" : "alert"} /></span>
           <div>
             <strong>{a.severity === "critical" ? "Critical" : a.severity === "warning" ? "Warning" : "Note"}:</strong>{" "}
             {a.message} <span className="faint">since {localTime(a.since, true)}</span>
           </div>
+          <button className="alert-x" title="Dismiss (it comes back if the problem returns)" aria-label="Dismiss alert"
+            onClick={() => act(api.dismissAlerts([a.id]))}><Icon name="x" size={14} /></button>
         </div>
       ))}
+      <div className="row faint" style={{ justifyContent: "flex-end" }}>
+        {alerts.length > 1 && <button className="btn link" onClick={() => act(api.dismissAlerts())}>Dismiss all</button>}
+        {hidden > 0 && <button className="btn link" onClick={() => act(api.restoreAlerts())}>Show {hidden} dismissed</button>}
+      </div>
     </div>
   );
 }
@@ -67,7 +74,7 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
 
   return (
     <>
-      <AlertList alerts={status.alerts} />
+      <AlertList alerts={status.alerts} hidden={status.dismissed_alerts} refresh={refresh} />
 
       <Card
         title={<span className="row">Ventilation{status.groups.length === 1 && g?.name ? ` · ${g.name}` : ""}</span>}
