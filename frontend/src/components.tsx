@@ -38,7 +38,7 @@ export function Stat({ label, value, badge, tone }: { label: string; value: Reac
   );
 }
 
-export type Series = { key: string; name: string; color: string; dashed?: boolean };
+export type Series = { key: string; name: string; color: string; dashed?: boolean; width?: number };
 
 /** Shaded fan-on intervals from rows with a boolean-ish `on` field. */
 export function fanIntervals(rows: { x: number; on: boolean }[]): [number, number][] {
@@ -55,14 +55,14 @@ export function fanIntervals(rows: { x: number; on: boolean }[]): [number, numbe
 }
 
 export function TimeChart({
-  data, series, unit, height = 220, fanOn, xFormat, zeroLine, yDomain, digits = 1, title, badge, band, lines, nowX,
+  data, series, unit, height = 220, fanOn, xFormat, zeroLine, yDomain, digits = 1, title, badge, band, lines, nowX, hideLegend,
 }: {
   data: Json[]; series: Series[]; unit: string; height?: number; fanOn?: [number, number][];
   xFormat: (x: number) => string; zeroLine?: boolean; yDomain?: [number | string, number | string]; digits?: number;
   title: string; badge?: string;
   band?: { y1: number; y2: number; label: string };
   lines?: { y: number; label: string; tone?: "crit" | "warn" }[];
-  nowX?: number;
+  nowX?: number; hideLegend?: boolean;
 }) {
   return (
     <div>
@@ -71,7 +71,7 @@ export function TimeChart({
         {badge && <span className={`badge ${badge}`}>{badge}</span>}
         <div className="spacer" />
         <div className="legend">
-          {series.length > 1 && series.map((s) => (
+          {!hideLegend && series.length > 1 && series.map((s) => (
             <span key={s.key}><span className="sw" style={{ background: s.color }} />{s.name}</span>
           ))}
           {fanOn && <span><span className="sw area" style={{ background: "var(--fan-shade)" }} />Fans on</span>}
@@ -114,7 +114,7 @@ export function TimeChart({
             }}
           />
           {series.map((s) => (
-            <Line key={s.key} dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={2} dot={false}
+            <Line key={s.key} dataKey={s.key} name={s.name} stroke={s.color} strokeWidth={s.width || 2} dot={false}
               strokeDasharray={s.dashed ? "4 3" : undefined} isAnimationActive={false} connectNulls={false}
               activeDot={{ r: 4, stroke: "var(--surface)", strokeWidth: 2 }} />
           ))}

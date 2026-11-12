@@ -154,7 +154,7 @@ def test_storage_migrations_idempotent(tmp_path):
     s = Storage(p)
     s.save_config(example_config())
     s2 = Storage(p)
-    assert s2.migrate() == 6
+    assert s2.migrate() == 7
     assert s2.load_config().fans[0].id == "v2d"
 
 
@@ -169,3 +169,21 @@ def test_removed_plug_alerts_clear_when_settings_change():
     ctrl.apply_config(new)
     assert "SWITCH_OFFLINE:mock-plug-1" not in ctrl.alerts
     assert "mock-plug-1" not in ctrl.switch_info
+
+
+def test_history_records_each_device():
+    """Every sensor and plug gets its own entry in history so the History tab can chart and audit it."""
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    run_minutes(ctrl, clock, 10)
+    rows = store.history(T0, T0 + timedelta(hours=1))
+    dev = rows[-1]["devices"]
+    sensor_ids = {m.sensor_id for m in ctrl.config.sensors.mappings if m.enabled}
+    assert sensor_ids <= set(dev["sensors"])
+    for sid, v in dev["sensors"].items():
+        assert v["ok"] in (0, 1)
+        if v["ok"] and v["rh"] is not None:
+            assert 0 <= v["rh"] <= 100
+    plug_ids = {f.switch_id for f in ctrl.config.fans if f.switch_id}
+    assert plug_ids <= set(dev["plugs"])
+    assert all(p["on"] in (0, 1, None) for p in dev["plugs"].values())

@@ -111,6 +111,10 @@ MIGRATIONS: list[str] = [
     ALTER TABLE history ADD COLUMN avg_td_c REAL;
     ALTER TABLE history ADD COLUMN avg_w REAL;       -- kg/kg
     """,
+    # 7: per-device readings so the History tab can chart and audit every sensor and plug on its own
+    """
+    ALTER TABLE history ADD COLUMN devices TEXT;  -- JSON {sensors: {id: {t_c, rh, ok}}, plugs: {id: {on, ok, w}}}
+    """,
 ]
 
 
@@ -255,6 +259,7 @@ class Storage:
             r["groups"] = json.loads(r["groups"]) if r.get("groups") else {}
             r["circ"] = json.loads(r["circ"]) if r.get("circ") else {}
             r["surfaces"] = json.loads(r["surfaces"]) if r.get("surfaces") else {}
+            r["devices"] = json.loads(r["devices"]) if r.get("devices") else None
         if len(out) > max_points:
             stride = len(out) / max_points
             out = [out[int(i * stride)] for i in range(max_points)]
