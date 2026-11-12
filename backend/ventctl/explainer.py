@@ -64,14 +64,21 @@ Order of checks:
    - interlocks (water intrusion, combustion appliance, depressurization) if configured
    - condensation: fans stop if running would make a surface wetter, either because
      outdoor air wetter than the basement would reach a cold surface, or because cold air
-     would chill a surface close to its dew point (3 F margin)
+     would chill a surface close to its dew point (3 F margin; with a measured probe the probe
+     and dew-point uncertainty, about 2.2 F, is added). Without any surface reading the app
+     skips outdoor air colder than the basement dew point plus the margin.
    - temperature limits: fans stop if they are predicted to cool the basement below the
      minimum (55 F by default) or chill pipes toward freezing
 3. Direction: if the outdoor air holds as much or more water than the basement air, fans
    stop immediately, because running them would ADD water.
 4. Benefit, with on/off thresholds so the fans don't flicker (hysteresis):
-   - basement RH must be above the target (start at target + 2%, stop at target). In a strong
-     drying window (outdoor dew point 8 F or more lower) a running fan keeps going down to 50%
+   - humidity demand: the MOST HUMID ROOM (by RH) whose air still holds more water than the
+     outdoor air must be above the target (start at target + 2%, stop at target). In a strong
+     drying window (outdoor dew point 8 F or more lower) a running fan keeps going down to 50%.
+     Water removed and the dew-point gap are judged on the air the exhaust fans pull out.
+   - OR, with a concrete probe, the estimated RH right at the coldest surface (read on the
+     cold side of the probe's +/-2 F accuracy) is above control.surface_target_rh_pct
+     (default 70%, start 3% higher). Reason SURFACE_HUMIDITY_HIGH. Room targets still apply.
    - dew-point gap, like a thermostat's deadband: the outdoor dew point must be at least
      control.dewpoint_on_advantage_f (default 3 F) lower than the basement's to START, and
      running fans keep going while it is more than control.dewpoint_off_advantage_f (default
@@ -79,8 +86,9 @@ Order of checks:
      purpose: under about 1 F the normal error between two sensors is as big as the gap, so
      outside may not really be drier. The owner can change both in Settings.
    - the estimated water removed per hour must exceed a minimum
-   - efficiency (water removed per kWh, counting fan power and the extra AC/heating cost of
-     replacing upstairs air) must clear the energy profile's threshold: Maximum Drying has
+   - efficiency (water removed per kWh, counting fan power, circulators that run with the
+     exhaust, and the extra AC/heating cost of replacing upstairs air, including AC
+     dehumidifying on mild muggy days) must clear the energy profile's threshold: Maximum Drying has
      none, Balanced needs 1,500 g/kWh, Energy Saver 5,000 g/kWh. Stop threshold is 70% of start.
 5. Minimum run and off times (control.min_on_minutes, default 15; control.min_off_minutes,
    default 10) hold the current state for a while after a change (shown as

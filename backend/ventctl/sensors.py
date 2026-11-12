@@ -184,13 +184,17 @@ class Conditions:
     exhaust_label: str | None = None
     forecast: list | None = None  # [(datetime, AirState)] outdoor forecast, optional
     forecast_age_h: float | None = None
+    # every usable basement sensor on its own: humidity demand is judged room by room (a cool room can be at
+    # 80% RH while holding less water than a warm room at 55%), removal on the exhaust air
+    rooms: list[dict] = field(default_factory=list)  # {name, zone, sensor_id, air}
 
 
 def aggregate_zones(airs: list[AirState], method: str) -> AirState:
     if len(airs) == 1:
         return airs[0]
     if method == "wettest":
-        # by moisture content: a cooler zone shows a higher RH with the same water in the air
+        # by moisture content (the air ventilation would remove). Humidity *demand* is judged per room
+        # in engine.humidity_demand, so a cool room with high RH is not missed.
         return max(airs, key=lambda a: a.w)
     # mean: average temperature and humidity ratio (moisture content), then derive RH
     t = sum(a.t_c for a in airs) / len(airs)
@@ -271,6 +275,8 @@ def conditions_for_group(snapshot: Snapshot, group: FanGroup, config: AppConfig)
         surfaces=[_surface_entry(r, snapshot, config) for r in surf],
         pipe_c=pipe.temp_c if pipe else None, pipe_label=pipe.mapping.name if pipe else None,
         pipe_sensors=len(pipes_all),
+        rooms=[{"name": r.mapping.name, "zone": r.mapping.zone, "sensor_id": r.mapping.sensor_id, "air": a}
+               for r, a in good],
     )
 
 

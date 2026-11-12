@@ -49,6 +49,9 @@ STEPS: list[dict] = [
      "summary": "Review the humidity target and the temperature range you want to keep."},
     {"id": "golive", "title": "Turn it on",
      "summary": "Final check, then switch the controller to Automatic."},
+    {"id": "verify", "title": "Prove it's working",
+     "summary": "First weeks: compare sensors side by side, check cold surfaces and airflow, and plan for muggy "
+                "weather."},
 ]
 STEP_IDS = [s["id"] for s in STEPS]
 
@@ -257,13 +260,16 @@ def check_sensors(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[di
     elif cfg.control.surface_temp_estimate_f is not None:
         out.append(_c("probe", "warn", "No concrete probe; using your estimated surface temperature"))
     else:
-        out.append(_c("probe", "fail", "No concrete probe (WN30BL) set up",
-                      "Without it, Automatic mode stays off because the app can't check for condensation. "
-                      "Map the probe (its id looks like ecowitt:tf1)."))
+        out.append(_c("probe", "warn", "No concrete probe (WN30BL) set up",
+                      "Without it the app can't see how damp the slab is, and it plays safe by skipping outdoor air "
+                      "colder than the basement's dew point (many cool, dry nights). Map the probe (its id looks "
+                      "like ecowitt:tf1)."))
     up = [m for m in maps if m.role == SensorRole.UPSTAIRS]
     if not up:
-        out.append(_c("upstairs", "warn", "No upstairs sensor (optional)",
-                      "The gateway's own indoor sensor (ecowitt:indoor) works if the gateway is upstairs."))
+        out.append(_c("upstairs", "warn", "No upstairs sensor (recommended)",
+                      "The exhaust fans pull some air down from the house. An upstairs T/RH sensor lets the app "
+                      "measure how much instead of assuming 10%, and price the AC cost properly. The gateway's own "
+                      "indoor sensor (ecowitt:indoor) works if the gateway is upstairs."))
     names = [m.name.strip().lower() for m in maps]
     if len(names) != len(set(names)):
         out.append(_c("names", "warn", "Two sensors have the same name", "Give each a name you'll recognise."))
@@ -304,6 +310,13 @@ def check_zones(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[dict
     if abs(share - 1) > 0.05:
         out.append(_c("share", "warn", f"Moisture shares add up to {share:.0%}, not 100%",
                       "These are rough guesses of where the dampness comes from; make them add to 100%."))
+    for z in cfg.zones:
+        ms = [m for m in cfg.sensors.mappings if m.enabled and m.role == SensorRole.BASEMENT and m.zone == z.id]
+        if len(ms) > 1:
+            out.append(_c(f"shared-{z.id}", "warn", f"'{z.name}' has {len(ms)} sensors: "
+                          + ", ".join(m.name for m in ms),
+                          "If they sit in separate rooms, give each room its own zone so a damp room can't hide in "
+                          "an average. Keep the one nearest the exhaust fans in the zone marked 'exterior fan here'."))
     out.append(_ask(ans, "zones_reviewed", "The zone names and sizes match my basement"))
     return out
 
@@ -468,6 +481,10 @@ def check_targets(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[di
     c, t = cfg.control, cfg.temperature
     out = [_c("rh", "ok" if 45 <= c.target_rh_pct <= 60 else "warn", f"Humidity target: {c.target_rh_pct:.0f}%",
               "" if 45 <= c.target_rh_pct <= 60 else "50-55% is the usual basement target; mould grows above 60%.")]
+    if c.surface_demand_enabled:
+        out.append(_c("surface_rh", "ok", f"Slab and wall humidity target: {c.surface_target_rh_pct:.0f}%",
+                      "With a concrete probe the fans also run when the coldest surface is damp, even if the room "
+                      "air looks fine. About 70% leaves headroom below where mold tends to start."))
     out.append(_c("temp", "ok", f"Keep the basement between {t.preferred_min_f:.0f}°F and {t.preferred_max_f:.0f}°F "
                                 f"(never below {t.min_allowed_f:.0f}°F)"))
     if cfg.dehumidifier.enabled:
@@ -497,10 +514,75 @@ def check_golive(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[dic
     return out
 
 
+def check_verify(cfg: AppConfig, status: dict, ans: dict, ctx: dict) -> list[dict]:
+    """Commissioning checks from the 2026-11-12 physics review: things that turn assumptions into measurements."""
+    out = []
+    maps = [m for m in cfg.sensors.mappings if m.enabled and m.role in (SensorRole.BASEMENT, SensorRole.OUTDOOR,
+                                                                        SensorRole.UPSTAIRS)]
+    calibrated = [m for m in maps if m.calibrated_at]
+    cmp = ctx.get("comparison") or {}
+    if cmp.get("active"):
+        out.append(_c("compare", "warn", f"Side-by-side comparison running ({cmp.get('hours', 0):.0f} h so far)",
+                      "Leave the sensors together for 24 to 48 hours. While the outdoor sensor is inside, "
+                      "Automatic keeps the exhaust fans off. Stop the comparison and put each sensor back when done."))
+    elif calibrated or ans.get("sensors_compared"):
+        out.append(_c("compare", "ok", "Sensors compared side by side",
+                      f"{len(calibrated)} sensor(s) have offsets from a comparison." if calibrated else ""))
+    else:
+        out.append(_c("compare", "todo", "Compare all the T/RH sensors side by side",
+                      "Different rooms really can differ, so don't adjust sensors to match where they hang. Put them "
+                      "all together (outdoor one too) away from drafts, start the comparison on the Diagnostics tab, and leave "
+                      "them 24 to 48 hours. Automatic pauses while the outdoor sensor is inside. Apply offsets only "
+                      "for sensors that disagree when side by side, then put each one back.", ask="confirm"))
+        out[-1]["id"] = "sensors_compared"
+    damp = [z for z in cfg.zones if not any(m.role == SensorRole.BASEMENT and m.zone == z.id and m.enabled
+                                            for m in cfg.sensors.mappings)]
+    for z in damp:
+        out.append(_c(f"nosensor-{z.id}", "warn", f"'{z.name}' has no air sensor",
+                      "The damp-prone area is where a sensor matters most. Without one the app can't tell if it's "
+                      "drying, and circulation fans won't run toward it."))
+    if not any(m.role == SensorRole.SURFACE and m.enabled for m in cfg.sensors.mappings):
+        out.append(_c("probe", "warn", "No slab or wall probe yet",
+                      "Tape the WN30BL tip flat to bare concrete at the coldest spot (low on an outside wall or the "
+                      "slab near it), under a foam pad so it reads the surface, not the air. Assign it the zone "
+                      "whose air sensor is nearest."))
+    out.append(_ask(ans, "probe_reference", "I checked the probe against another thermometer on the same spot",
+                    "The WN30 is rated ±2°F. If it agrees within 1°F with a good thermometer, set Probe uncertainty "
+                    "to 1°F in Settings so the app can be less cautious."))
+    out.append(_ask(ans, "wood_checked", "I checked the coldest wood and corners (sill plate, joist ends, closets)",
+                    "A cheap pin moisture meter works: wood under about 16% is fine. One probe can't see every cold "
+                    "spot, and a temperature probe can't see water coming up through the concrete."))
+    out.append(_ask(ans, "vents_open", "The passive vents opposite the fans are open, and I saw air move through "
+                                      "the doorways",
+                    "With the exhaust running, hold an incense stick or a strip of tissue at each opening between "
+                    "rooms. Air should drift toward the fans. A room with no draft isn't being ventilated."))
+    out.append(_ask(ans, "airflow_measured", "I measured the fans' real power (and airflow if I can)",
+                    "A plug-in watt meter shows real power. Airflow is optional: a cheap anemometer across the "
+                    "outside vent. The app assumes 220 CFM and 40 W per fan until told otherwise. Try one fan vs "
+                    "two once: two fans rarely move twice the air through the far rooms."))
+    if not any(m.role == SensorRole.UPSTAIRS and m.enabled for m in cfg.sensors.mappings):
+        out.append(_c("upstairs", "warn", "No upstairs sensor",
+                      "Needed to measure how much house air the fans pull down instead of assuming 10%."))
+    circs = [c for c in cfg.circulators if c.enabled]
+    if circs:
+        out.append(_ask(ans, "circ_observed", "With a circulation fan on, the far room's dew point dropped",
+                        "Watch History for that room during a run. A fan spinning in a room is not proof air is "
+                        "being exchanged through it. Leave circulation in Shadow until this shows a benefit."))
+    pol = cfg.control.policy.value
+    out.append(_c("policy", "ok" if pol == "moisture" else "warn", f"Control logic: {pol}",
+                  "" if pol == "moisture" else "Keep the moisture logic in control and the temperature-aware one "
+                                                 "in shadow until real fan cycles back up its predictions."))
+    out.append(_ask(ans, "dehum_plan", "I have a plan for muggy months (a dehumidifier on its own humidistat)",
+                    "On muggy days outdoor air is wetter than the basement and the fans can't help. A dehumidifier "
+                    "set to about 50% is the only thing that removes water then. Fix any leaks, gutters or grading "
+                    "first: no fan keeps up with liquid water."))
+    return out
+
+
 CHECKS = {
     "prepare": check_prepare, "install": check_install, "location": check_location, "gateway": check_gateway, "sensors": check_sensors,
     "zones": check_zones, "plugs": check_plugs, "exhaust": check_exhaust, "circulators": check_circulators,
-    "safety": check_safety, "targets": check_targets, "golive": check_golive,
+    "safety": check_safety, "targets": check_targets, "golive": check_golive, "verify": check_verify,
 }
 
 
