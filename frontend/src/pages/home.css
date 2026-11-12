@@ -270,3 +270,10 @@
   .h-fanswitch .h-seg { grid-column: 1 / -1; justify-self: stretch; }
   .h-seg button { flex: 1; }
 }
+
+/* history charts on Home */
+.h-charts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+@media (max-width: 1000px) { .h-charts { grid-template-columns: minmax(0, 1fr); } }
+.h-charts .chart-title h3 { font-size: 14px; }
+.h-seg.small button { padding: 5px 10px; font-size: 13px; min-width: 0; }
+.h-one { display: grid; gap: 16px; }

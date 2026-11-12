@@ -1,10 +1,9 @@
 /* Home: a friendly, at-a-glance overview. Everything here is also on the detailed
    Dashboard; this page trades detail for plain words, icons and a few quick controls. */
 import { ReactNode, useEffect, useState } from "react";
-import { Area, AreaChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { api, Json } from "../api";
-import { Icon } from "../components";
-import { temp, useUnit } from "../units";
+import { Icon, TimeChart, fanIntervals } from "../components";
+import { temp, tempVal, useUnit } from "../units";
 import "./home.css";
 
 /* ---------- icons ---------- */
@@ -203,12 +202,64 @@ function FanOrb({ on, tone, size = 72 }: { on: boolean; tone: Tone; size?: numbe
   );
 }
 
+/* ---------- the History page's main charts, for the Home page ---------- */
+const RANGES = [["24h", "24 h"], ["3d", "3 days"], ["7d", "7 days"]] as const;
+
+function HomeCharts() {
+  const u = useUnit();
+  const [range, setRange] = useState<string>(() => {
+    try { return localStorage.getItem("ventctl.homeRange") || "24h"; } catch { return "24h"; }
+  });
+  const [data, setData] = useState<Json[] | null>(null);
+  useEffect(() => {
+    try { localStorage.setItem("ventctl.homeRange", range); } catch { /* storage unavailable */ }
+    const load = () => api.history(range).then((h) => setData(h?.rows || [])).catch(() => setData([]));
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, [range]);
+  const rows = (data || []).map((r) => ({
+    x: new Date(r.ts).getTime(), on: r.fans_on > 0,
+    in_t: tempVal(r.indoor_t_c, u), out_t: tempVal(r.outdoor_t_c, u),
+    in_td: tempVal(r.indoor_td_c, u), out_td: tempVal(r.outdoor_td_c, u),
+    in_rh: r.indoor_rh, out_rh: r.outdoor_rh, avg_rh: r.avg_rh, avg_td: tempVal(r.avg_td_c, u), avg_t: tempVal(r.avg_t_c, u),
+  }));
+  const fan = fanIntervals(rows);
+  const days = rows.length > 1 ? (rows[rows.length - 1].x - rows[0].x) / 864e5 : 1;
+  const xf = (x: number) => new Date(x).toLocaleString(undefined, days > 1.5
+    ? { weekday: "short", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
+  const T = `°${u}`;
+  const showAvg = rows.some((r) => r.avg_rh != null) && rows.some((r) => r.avg_rh != null && r.in_rh != null && Math.abs(r.avg_rh - r.in_rh) > 0.5);
+  const inName = showAvg ? "Most humid area" : "Basement";
+  const avg = (key: string) => (showAvg ? [{ key, name: "Whole basement", color: "var(--series-6)", dashed: true }] : []);
+  return (
+    <Panel icon="drop" title="Humidity, dew point and temperature" right={
+      <div className="h-seg small" role="radiogroup" aria-label="Time range">
+        {RANGES.map(([k, label]) => <button key={k} role="radio" aria-checked={range === k} className={range === k ? "active" : ""} onClick={() => setRange(k)}>{label}</button>)}
+      </div>}>
+      {data === null ? <p className="faint">Loading…</p> : rows.length < 2 ? <p className="faint">Not enough history yet. Check back in an hour.</p> : (
+        <div className="h-charts">
+          <TimeChart title="Humidity" unit="%" digits={0} data={rows} xFormat={xf} fanOn={fan} height={190} series={[
+            { key: "in_rh", name: inName, color: "var(--series-1)" }, ...avg("avg_rh"),
+            { key: "out_rh", name: "Outside", color: "var(--series-2)" }]} />
+          <TimeChart title="Dew point" unit={T} data={rows} xFormat={xf} fanOn={fan} height={190} series={[
+            { key: "in_td", name: inName, color: "var(--series-1)" }, ...avg("avg_td"),
+            { key: "out_td", name: "Outside", color: "var(--series-2)" }]} />
+          <TimeChart title="Temperature" unit={T} data={rows} xFormat={xf} fanOn={fan} height={190} series={[
+            { key: "in_t", name: inName, color: "var(--series-1)" }, ...avg("avg_t"),
+            { key: "out_t", name: "Outside", color: "var(--series-2)" }]} />
+        </div>
+      )}
+      <p className="h-hint">Shaded bands show when the exhaust fans ran. The fans help when the outside dew point line is below the basement's.</p>
+    </Panel>
+  );
+}
+
 /* ---------- page ---------- */
 
 export default function Home({ status, refresh, openTab }: { status: Json; refresh: () => void; openTab: (t: string) => void }) {
   const u = useUnit();
   const [stats, setStats] = useState<Json>(null);
-  const [hist, setHist] = useState<Json[]>([]);
   const [targets, setTargets] = useState<Targets>(DEFAULT_TARGETS);
   const [dpOnF, setDpOnF] = useState(3);
   const [busy, setBusy] = useState("");
@@ -222,7 +273,6 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
     }).catch(() => {});
     const load = () => {
       api.stats("24h").then(setStats).catch(() => {});
-      api.history("24h").then((h) => setHist(h?.rows || [])).catch(() => {});
     };
     load();
     const t = setInterval(load, 60000);
@@ -277,10 +327,6 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const goodHour = (h: Json) => indDpC != null && h.dew_point_c != null && cToF(indDpC)! - cToF(h.dew_point_c)! > 1;
   const goodCount = hours.filter(goodHour).length;
 
-  /* last 24 h chart rows */
-  const rows = hist.map((r) => ({ x: new Date(r.ts).getTime(), rh: r.indoor_rh, avg: r.avg_rh, out: r.outdoor_rh, on: r.fans_on ? 1 : 0 }))
-    .filter((r) => r.rh != null);
-  const showAvgLine = !!avg && rows.some((r) => r.avg != null);
   const fanHours = stats?.fan_runtime_h;
 
   const zones: Json[] = Object.values(status.zones || {});
@@ -431,51 +477,10 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       </div>
       <p className="faint h-caption">Last 24 hours. Water and drying figures are estimates from the sensors, not measurements.</p>
 
-      <div className="h-two">
-        {/* ---------- humidity chart ---------- */}
-        <Panel icon="drop" title="Humidity today" right={<span className="faint">last 24 h</span>}>
-          {rows.length > 1 ? (
-            <div className="h-chart">
-              <ResponsiveContainer width="100%" height={190}>
-                <AreaChart data={rows} margin={{ top: 8, right: 6, bottom: 0, left: -18 }}>
-                  <defs>
-                    <linearGradient id="hRhFill" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor="var(--h-blue)" stopOpacity={0.35} />
-                      <stop offset="100%" stopColor="var(--h-blue)" stopOpacity={0.02} />
-                    </linearGradient>
-                  </defs>
-                  <XAxis dataKey="x" type="number" scale="time" domain={["dataMin", "dataMax"]} tickLine={false}
-                    axisLine={false} minTickGap={50} tick={{ fill: "var(--text-3)", fontSize: 11 }}
-                    tickFormatter={(x) => new Date(x).toLocaleTimeString(undefined, { hour: "numeric" })} />
-                  <YAxis domain={[(lo: number) => Math.max(0, Math.floor(Math.min(lo, targets.target) / 10) * 10 - 5), (hi: number) => Math.min(100, Math.ceil(hi / 10) * 10)]}
-                    tickLine={false} axisLine={false} tick={{ fill: "var(--text-3)", fontSize: 11 }} tickFormatter={(v) => `${v}%`} />
-                  <ReferenceLine y={targets.target} stroke="var(--h-green)" strokeDasharray="5 4"
-                    label={{ value: "goal", position: "insideTopRight", fill: "var(--h-green)", fontSize: 11 }} />
-                  <Tooltip cursor={{ stroke: "var(--text-3)" }} content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null;
-                    const r = payload[0].payload;
-                    return (
-                      <div className="tooltip">
-                        <div className="t-head">{new Date(r.x).toLocaleString(undefined, { weekday: "short", hour: "numeric", minute: "2-digit" })}</div>
-                        <div className="t-row"><span>{showAvgLine ? "Most humid area" : "Basement"}</span><strong>{r0(r.rh)}</strong></div>
-                        {showAvgLine && r.avg != null && <div className="t-row"><span>Whole basement</span><strong>{r0(r.avg)}</strong></div>}
-                        {r.out != null && <div className="t-row"><span>Outside</span><strong>{r0(r.out)}</strong></div>}
-                        <div className="t-row"><span>Fan</span><strong>{r.on ? "running" : "resting"}</strong></div>
-                      </div>
-                    );
-                  }} />
-                  <Area type="monotone" dataKey="rh" stroke="var(--h-blue)" strokeWidth={2.5} fill="url(#hRhFill)" isAnimationActive={false} dot={false} />
-                  {showAvgLine && <Area type="monotone" dataKey="avg" stroke="var(--h-violet)" strokeWidth={2} strokeDasharray="5 4" fill="none" isAnimationActive={false} dot={false} connectNulls />}
-                </AreaChart>
-              </ResponsiveContainer>
-              <div className="h-fanstrip" aria-label="When the fan ran">
-                {rows.map((r, i) => <span key={i} className={r.on ? "on" : ""} />)}
-              </div>
-              <div className="h-legend"><span className="sw blue" />{showAvgLine ? "Most humid area" : "Basement humidity"} {showAvgLine && <><span className="sw violet" />Whole basement </>}<span className="sw fan" />Fan running</div>
-            </div>
-          ) : <p className="faint">Not enough history yet. Check back in an hour.</p>}
-        </Panel>
+      {/* ---------- history charts ---------- */}
+      <HomeCharts />
 
+      <div className="h-one">
         {/* ---------- forecast ---------- */}
         <Panel icon="clock" title="Next 12 hours" right={hours.length ? <span className={`h-chip ${goodCount ? "good" : "subtle"}`}>{goodCount ? `${goodCount} good drying ${goodCount === 1 ? "hour" : "hours"}` : "No good drying hours"}</span> : null}>
           {hours.length ? (
