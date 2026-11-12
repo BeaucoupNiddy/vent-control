@@ -1,5 +1,6 @@
 /* Equipment health and wall condensation for the Home page. */
 import { Json } from "../../api";
+import { plugOn, plugPending } from "../../fanstate";
 import { TempUnit, temp } from "../../units";
 import { HIcon } from "./icons";
 import { Tone, ago, dDeg, hourLabel } from "./util";
@@ -43,10 +44,10 @@ export function devices(status: Json): Device[] {
   Object.keys(sws).forEach((id) => {
     const sw = sws[id];
     const ok = sw.reachable !== false;
-    const on = !!sw.confirmed;
+    const on = plugOn(sw);
     out.push({
       id: `p:${id}`, icon: "plug", kind: "Smart plug", name: owner[id] ? `Plug · ${owner[id]}` : `Plug ${id}`,
-      tone: ok ? "good" : "bad", state: ok ? (on ? "On" : "Off") : "Not responding",
+      tone: ok ? (plugPending(sw) ? "warn" : "good") : "bad", state: ok ? (plugPending(sw) ? `Turning ${sw.commanded ? "on" : "off"}…` : on ? "On" : "Off") : "Not responding",
       detail: ok ? `${sw.power_w > 0.5 ? `${Math.round(sw.power_w)} W · ` : ""}checked ${sw.last_ok ? ago((new Date(status.now).getTime() - new Date(sw.last_ok).getTime()) / 1000) : "—"}`
         : sw.error ? String(sw.error) : "Commands are not getting through",
     });

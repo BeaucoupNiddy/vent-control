@@ -128,6 +128,9 @@ class Storage:
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()  # one connection shared by API threads and the control loop
+        # Once real sensors are connected, leave earlier demo (mock) rows out of every history read,
+        # so charts, totals and reports only describe the real basement. The rows stay in the file.
+        self.hide_mock = False
         self.db = sqlite3.connect(self.path, check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -251,7 +254,8 @@ class Storage:
             self.db.commit()
 
     def history(self, start: datetime, end: datetime, max_points: int = 2000) -> list[dict]:
-        rows = self._fetchall("SELECT * FROM history WHERE ts >= ? AND ts <= ? ORDER BY ts",
+        extra = " AND source NOT IN ('mock', 'backfill')" if self.hide_mock else ""
+        rows = self._fetchall(f"SELECT * FROM history WHERE ts >= ? AND ts <= ?{extra} ORDER BY ts",
                                (_iso(start), _iso(end)))
         out = [dict(r) for r in rows]
         for r in out:

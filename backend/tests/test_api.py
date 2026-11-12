@@ -70,3 +70,18 @@ def test_v3_zone_surface_circulation_endpoints(tmp_path):
         sim = c.post("/api/sim/zones", json={"params": {"duration_h": 12}, "strategies": ["none", "both"]}).json()
         assert [r["id"] for r in sim["results"]] == ["none", "both"]
         assert len(c.get("/api/sim/zones/strategies").json()) == 8
+
+
+def test_demo_history_hidden_once_real_sensors_connected(tmp_path):
+    """Charts and totals describe the real basement only: demo rows recorded before real sensors
+    were connected are left out of history reads (they stay in the file)."""
+    from ventctl.storage import Storage
+    s = Storage(str(tmp_path / "h.db"))
+    from datetime import datetime, timedelta, timezone
+    t0 = datetime(2026, 11, 11, 12, tzinfo=timezone.utc)
+    s.add_history(t0, {"source": "mock", "fans_on": 1, "fans_verified": 1})
+    s.add_history(t0 + timedelta(minutes=2), {"source": "measured", "fans_on": 0, "fans_verified": 1})
+    rng = (t0 - timedelta(hours=1), t0 + timedelta(hours=1))
+    assert [r["source"] for r in s.history(*rng)] == ["mock", "measured"]
+    s.hide_mock = True
+    assert [r["source"] for r in s.history(*rng)] == ["measured"]

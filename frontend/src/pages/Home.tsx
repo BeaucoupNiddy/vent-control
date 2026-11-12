@@ -4,6 +4,7 @@
    Keep syntax and APIs friendly to older iPhone Safari (see home/util.ts). */
 import { ReactNode, useEffect, useState } from "react";
 import { api, Json } from "../api";
+import { exhaustState, plugOn } from "../fanstate";
 import { temp, tempVal, useUnit } from "../units";
 import { ComfortDonut, ClimateChart, DailyBars, DryingChart, Gauge, MiniBars, Ring, Seg, Sparkline } from "./home/charts";
 import { CIRC_MODES, CircFanCard, ExhaustFanCard, FanOrb, ModeControl, modeLabel } from "./home/controls";
@@ -11,7 +12,7 @@ import { EquipmentList, WallMeter, devices } from "./home/equipment";
 import { HIcon } from "./home/icons";
 import {
   DEFAULT_TARGETS, HEADLINE, LEVEL_WORD, Pt, Targets, Tone, bands, cToF, dDeg, daily, feelWord, hourLabel, isDaytime,
-  r0, rhTone, since, timeUntil, toPts, trendDir,
+  r0, rhTone, since, timeUntil, toPts, trendDir, withLive,
 } from "./home/util";
 import "./home.css";
 
@@ -89,6 +90,8 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const [busy, setBusy] = useState("");
   const [err, setErr] = useState("");
   const [showAllAlerts, setShowAllAlerts] = useState(false);
+  // Reload history whenever the plugs report a change, so the charts' fan bands never lag the live state.
+  const liveSig = status ? `${exhaustState(status).on}:${status.simulation_mode ? 1 : 0}:${status.mode}` : "";
 
   useEffect(() => {
     api.config().then((c) => {
@@ -101,18 +104,18 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       api.history("7d").then((h) => setWeek(toPts((h && h.rows) || []))).catch(() => setWeek([]));
     };
     load();
-    const t = setInterval(load, 120000);
+    const t = setInterval(load, 60000);
     return () => clearInterval(t);
-  }, []);
+  }, [liveSig]);
 
   useEffect(() => {
     try { localStorage.setItem("ventctl.homeRange", range); } catch { /* storage unavailable */ }
-    setChartPts(null);
     const load = () => api.history(range).then((h) => setChartPts(toPts((h && h.rows) || []))).catch(() => setChartPts([]));
     load();
-    const t = setInterval(load, 120000);
+    const t = setInterval(load, 60000);
     return () => clearInterval(t);
-  }, [range]);
+  }, [range, liveSig]);
+  const pickRange = (r: string) => { setChartPts(null); setRangeState(r); };
 
   if (!status) return <div className="home"><div className="h-panel h-loading"><FanOrb on tone="ok" size={56} /> Loading your basement…</div></div>;
 
@@ -137,16 +140,24 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const safety = !!(d && d.safety);
   const advF: number | null = m.dewpoint_advantage_f != null ? m.dewpoint_advantage_f : null;
   const outsideDrier = advF != null && advF > 0;
-  const galDay: number | null = d && d.effect ? d.effect.net_removal_gal_day : null;
   const mode: string = status.mode;
   const sim = !!status.simulation_mode;
   const groups: Json[] = status.groups || [];
-  const fans: Json[] = [];
-  groups.forEach((x) => (x.fans || []).forEach((f: Json) => fans.push(f)));
-  const fansOn = fans.filter((f) => f.switch && f.switch.confirmed).length;
-  const anyOn = groups.some((x) => x.is_on) || fansOn > 0;
+  // Fan state everywhere on this page = what the plugs report (see fanstate.ts).
+  const ex = exhaustState(status);
+  const fans = ex.fans;
+  const fansOn = ex.on;
+  const anyOn = ex.anyOn;
   const totalCfm = fans.reduce((s, f) => s + (f.actual_cfm || f.rated_cfm || 0), 0);
+  // What the history records as "fans on": plug reports, or the hypothetical state in practice mode.
+  const liveOn = sim ? groups.some((x) => x.is_on) : anyOn;
+  const onSince = fans.filter((f) => plugOn(f.switch) && f.switch.on_since).map((f) => new Date(f.switch.on_since).getTime());
+  const liveSinceMs = onSince.length ? Math.min.apply(null, onSince) : null;
+  const nowMs = new Date(status.now).getTime();
   const manualLeft = timeUntil(g && g.manual_until, status.now);
+  // The decision's removal figure assumes every exhaust fan runs; scale it to the ones actually running.
+  const galAll: number | null = d && d.effect ? d.effect.net_removal_gal_day : null;
+  const galDay: number | null = galAll == null ? null : anyOn && fans.length ? (galAll * fansOn) / fans.length : galAll;
   const circ = status.circulation;
   const circs: Json[] = (circ && circ.circulators) || [];
   const surfaces: Json[] = status.surfaces || [];
@@ -176,6 +187,8 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
 
   /* history roll-ups */
   const day = week ? since(week, 24) : [];
+  const dayLive = withLive(day, liveOn, nowMs, liveSinceMs);
+  const chartLive = chartPts ? withLive(chartPts, liveOn, nowMs, liveSinceMs) : null;
   const days = week ? daily(week).slice(-7) : [];
   const b24 = bands(day, targets);
   const under24 = b24.total ? (b24.good + b24.ok) / b24.total : null;
@@ -223,7 +236,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
             <FanOrb on={anyOn} tone={safety ? "bad" : anyOn ? "good" : "idle"} size={64} />
             <div>
               <strong>{sim ? (d && d.target_on ? "Would run" : "Would rest") : anyOn ? `${fans.length > 1 ? `${fansOn} of ${fans.length} fans` : "Fan"} running` : `Exhaust ${fanWord} resting`}</strong>
-              <span>{modeLabel(mode)}{mode === "manual_on" && manualLeft ? ` · ${manualLeft} left` : ""}{anyOn && totalCfm ? ` · ${Math.round((totalCfm * (fans.length ? fansOn / fans.length : 1)))} CFM` : ""}</span>
+              <span>{modeLabel(mode)}{mode === "manual_on" && manualLeft ? ` · ${manualLeft} left` : ""}{anyOn && ex.cfm ? ` · ${Math.round(ex.cfm)} CFM` : ""}{ex.pending ? " · waiting for a plug to confirm" : ""}</span>
             </div>
           </div>
           <dl className="hs-facts">
@@ -336,7 +349,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       <SectionTitle id="trends" title="Trends" sub="Shaded bands show when the exhaust fans ran" />
       <div className="h-grid h-grid-trend">
         <Panel icon="chart" title="Climate history" sub={rangeLabel[0].toUpperCase() + rangeLabel.slice(1)}>
-          <ClimateChart pts={chartPts || []} loading={chartPts === null} u={u} t={targets} range={range} setRange={setRangeState} />
+          <ClimateChart pts={chartLive || []} loading={chartLive === null} nowX={nowMs} u={u} t={targets} range={range} setRange={pickRange} />
         </Panel>
         <Panel icon="target" title="Time in each humidity band" sub={rangeLabel[0].toUpperCase() + rangeLabel.slice(1)}>
           {chartPts === null ? <div className="h-chart-empty">Loading…</div> : <ComfortDonut pts={chartPts} t={targets} rangeLabel={rangeLabel} />}
@@ -345,7 +358,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       <div className="h-grid h-grid-trend">
         <Panel icon="wind" title="Drying power" sub={`Past 24 h${fcHours.length ? ` and next ${fcHours.length} h forecast` : ""}`}
           right={fcHours.length ? <span className={`h-chip ${goodCount ? "good" : "subtle"}`}>{goodCount ? `${goodCount} good ${goodCount === 1 ? "hour" : "hours"} ahead` : "No good hours ahead"}</span> : null}>
-          {week === null ? <div className="h-chart-empty">Loading…</div> : <DryingChart pts={day} forecast={fcHours} basementDpC={basementDpC} u={u} onF={dpOnF} />}
+          {week === null ? <div className="h-chart-empty">Loading…</div> : <DryingChart pts={dayLive} forecast={fcHours} basementDpC={basementDpC} u={u} onF={dpOnF} />}
           <p className="h-hint">How much drier outside air is than the air the fans pull out. Above the dashed line the fans can start; below zero, outside air would add water. The dashed part is the forecast.</p>
         </Panel>
         <Panel icon="home" title="Inside vs. outside">
