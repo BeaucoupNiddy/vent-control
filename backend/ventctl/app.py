@@ -211,6 +211,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         sensors, switches, world = factory.build(cfg, clock, None, start)
         ctrl = Controller(cfg, storage, sensors, switches, clock, data_source=factory.data_source(cfg),
                           forecast=ForecastCache(MockForecast(world) if world else OpenMeteoForecast()))
+        storage.hide_mock = ctrl.data_source != "mock"
         await ctrl.startup()
         if start < now:
             log.info("Backfilling %.0f h of mock history", backfill_hours)
@@ -274,6 +275,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             sensors, switches, world = factory.build(new, c.clock, state.get("world"), c.clock.now())
             c.sensors, c.switches = sensors, switches
             c.data_source = factory.data_source(new)
+            c.storage.hide_mock = c.data_source != "mock"
             state["world"] = world
             c.forecast = ForecastCache(MockForecast(world) if world else OpenMeteoForecast())
             c.storage.add_event(c.clock.now(), "config", "warning",

@@ -97,7 +97,8 @@ export function plugOf(p: PlugDev, r: Json): PlugState {
   if (d) return { on: d.on == null ? null : !!d.on, ok: !!d.ok, w: d.w == null ? null : d.w };
   if (p.kind === "exhaust") {
     const g = (r.groups || {})[p.group || ""];
-    return { on: g ? !!g.on : r.fans_on != null ? r.fans_on > 0 : null, ok: null, w: null };
+    // Older rows have no per-plug record: use the plugs' own count (as the charts do), not the group's intent.
+    return { on: r.fans_on != null ? r.fans_on > 0 : g ? !!g.on : null, ok: null, w: null };
   }
   const c = (r.circ || {})[p.circId || ""];
   return { on: c ? !!c.on : null, ok: null, w: c && c.power_w != null ? c.power_w : null };

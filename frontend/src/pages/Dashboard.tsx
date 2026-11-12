@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card, Icon, Stat } from "../components";
+import { plugOn } from "../fanstate";
 import TamoPanel, { ControllerLine, OpportunityBadge, ReasonList } from "./Tamo";
 import { CirculationPanel, SurfaceMonitor, ZonePanel } from "./Zones";
 import { deltaTemp, duration, hours, localTime, moisture, num, pct, temp, useUnit } from "../units";
@@ -219,15 +220,18 @@ export default function Dashboard({ status, refresh }: { status: Json; refresh: 
 function GroupDecision({ g, status }: { g: Json; status: Json }) {
   const d = g?.decision;
   const safety = d?.safety;
+  const gFans: Json[] = g?.fans || [];
+  const nOn = gFans.filter((f) => plugOn(f.switch)).length; // what the plugs report, same as the history
+  const isOn = nOn > 0;
   return (
     <>
       <div className="hero">
-        <div className={`state-dot ${safety ? "safety" : g?.is_on ? "on" : "off"}`}>
+        <div className={`state-dot ${safety ? "safety" : isOn ? "on" : "off"}`}>
           <Icon name={safety ? "shield" : "fan"} size={28} />
         </div>
         <div style={{ flex: 1, minWidth: 240 }}>
           <div className="row">
-            <span className="state-big">{status.simulation_mode ? (d?.target_on ? "Would run" : "Would stay off") : g?.is_on ? "Fans ON" : "Fans OFF"}</span>
+            <span className="state-big">{status.simulation_mode ? (d?.target_on ? "Would run" : "Would stay off") : isOn ? (gFans.length > 1 && nOn < gFans.length ? `${nOn} of ${gFans.length} fans ON` : "Fans ON") : "Fans OFF"}</span>
             <span className="badge">{status.mode.replace("_", " ").toUpperCase()}</span>
             {status.simulation_mode && <span className="badge mock">no physical commands</span>}
             {!g?.verified && <span className="badge crit">switch state unverified</span>}

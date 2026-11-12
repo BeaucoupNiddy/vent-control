@@ -1,5 +1,6 @@
 /* Controls on the Home page: system mode with boost, and one card per fan. */
 import { Json, api } from "../../api";
+import { circOn, plugOn, plugPending } from "../../fanstate";
 import { HIcon } from "./icons";
 import { Tone, minutesText, timeUntil } from "./util";
 
@@ -89,13 +90,14 @@ function Tri({ name, state, busy, keyBase, onPick, onLabel = "On 1 h", offLabel 
 
 export function ExhaustFanCard({ f, groupSafety, status, busy, act }: { f: Json; groupSafety: boolean; status: Json; busy: string; act: Act }) {
   const sw = f.switch || {};
-  const on = !!sw.confirmed;
+  const on = plugOn(sw);
   const reachable = sw.reachable !== false;
   const o = f.override as { state: string; until: string | null } | null;
   const state = (o && o.state) || "auto";
   const left = o && o.until ? timeUntil(o.until, status.now) : null;
   let note: string;
-  if (!reachable) note = "Smart plug not responding";
+  if (!reachable) note = `Smart plug not responding${sw.confirmed != null ? ` · last reported ${sw.confirmed ? "on" : "off"}` : ""}`;
+  else if (plugPending(sw)) note = `Turning ${sw.commanded ? "on" : "off"} · waiting for the plug to confirm`;
   else if (state === "off") note = "Held off by you";
   else if (state === "on" && !on) note = `Paused for safety${f.override_blocked ? `: ${String(f.override_blocked).replace(/^Fans OFF[^:]*:\s*/, "")}` : ""}`;
   else if (state === "on") note = `On by you${left ? ` · ${left} left` : ""}`;
@@ -129,7 +131,7 @@ export function ExhaustFanCard({ f, groupSafety, status, busy, act }: { f: Json;
 
 export function CircFanCard({ c, circMode, status, busy, act }: { c: Json; circMode: string; status: Json; busy: string; act: Act }) {
   const sw = c.switch || {};
-  const on = !!c.is_on;
+  const on = circOn(c);
   const reachable = sw.reachable !== false;
   const manualActive = c.manual != null && (!c.manual_until || new Date(c.manual_until).getTime() > new Date(status.now).getTime());
   const state = manualActive ? (c.manual ? "on" : "off") : "auto";
@@ -137,6 +139,7 @@ export function CircFanCard({ c, circMode, status, busy, act }: { c: Json; circM
   const would = c.decision && c.decision.target_on;
   let note: string;
   if (!reachable) note = "Smart plug not responding";
+  else if (plugPending(sw)) note = `Turning ${sw.commanded ? "on" : "off"} · waiting for the plug to confirm`;
   else if (manualActive) note = `${c.manual ? "On" : "Off"} by you${left ? ` · ${left} left` : ""}`;
   else if (circMode === "shadow") note = `Learning · would ${would ? "run" : "rest"} now`;
   else if (circMode === "off") note = "Automation off";

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, Json } from "./api";
 import { Icon } from "./components";
+import { exhaustState } from "./fanstate";
 import Ask from "./pages/Ask";
 import Dashboard from "./pages/Dashboard";
 import Diagnostics from "./pages/Diagnostics";
@@ -57,14 +58,14 @@ export default function App() {
   }, []);
   useEffect(() => { save("ventctl.unit", unit); }, [unit]);
 
-  const g = status?.groups?.[0];
+  const ex = status ? exhaustState(status) : null;
   return (
     <UnitContext.Provider value={unit}>
       <header className="topbar">
         <div className="brand">
           <Icon name="fan" size={22} />
           <h1>Basement Ventilation</h1>
-          {status && <span className={`badge ${g?.is_on ? "good" : ""}`}>{g?.is_on ? "ON" : "OFF"} · {status.mode.replace("_", " ")}</span>}
+          {status && ex && <span className={`badge ${ex.anyOn ? "good" : ""}`}>{ex.anyOn ? (ex.total > 1 ? `${ex.on} of ${ex.total} ON` : "ON") : "OFF"} · {status.mode.replace("_", " ")}</span>}
           {status?.data_source === "mock" && <span className="badge mock">mock hardware</span>}
           {status?.clock_speed > 1 && <span className="badge mock">demo ×{status.clock_speed}</span>}
         </div>

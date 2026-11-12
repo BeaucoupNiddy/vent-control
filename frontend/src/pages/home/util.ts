@@ -133,6 +133,24 @@ function weights(pts: Pt[]): number[] {
   return pts.map((p, i) => (i === 0 ? 0 : Math.min(p.x - pts[i - 1].x, 15 * 60000) / 3600000));
 }
 
+/** Add the live plug state after the last recorded row, so a chart's fan band ends where the fans
+    really are now: closed at the last recorded "on" row if they have since stopped, or drawn from
+    when the plug turned on if they started after the last row. History rows come every few minutes. */
+export function withLive(pts: Pt[], liveOn: boolean, nowMs: number, onSinceMs: number | null): Pt[] {
+  if (!pts.length) return pts;
+  const last = pts[pts.length - 1];
+  if (!(nowMs > last.x)) return pts;
+  const blank = (x: number, on: boolean): Pt => ({
+    x, on, rh: null, in_rh: null, avg_rh: null, out_rh: null, in_td: null, avg_td: null, out_td: null,
+    in_t: null, avg_t: null, out_t: null, gapF: null, removal: 0, zones: {},
+  });
+  const out = pts.slice();
+  if (last.on && !liveOn) out.push(blank(last.x + 1, false));
+  if (liveOn && !last.on) out.push(blank(Math.min(nowMs - 1, Math.max(last.x + 1, onSinceMs != null ? onSinceMs : nowMs - 1)), true));
+  out.push(blank(nowMs, liveOn));
+  return out;
+}
+
 export function since(pts: Pt[], hours: number): Pt[] {
   if (!pts.length) return pts;
   const cut = pts[pts.length - 1].x - hours * 3600000;
