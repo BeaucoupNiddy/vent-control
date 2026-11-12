@@ -391,6 +391,17 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
                           f"{counts['events']} events). Backup: {Path(backup).name if backup else 'none'}", "DATA_RESET")
         return {"deleted": counts, "backup": backup}
 
+    @app.post("/api/start-now")
+    async def start_now():
+        c = ctrl()
+        c.start_now()
+        await c.tick()  # act now instead of at the next decision
+        st = c.status()
+        evs = c.storage.events(kind="override", limit=1)
+        st["start_now_note"] = (evs[0]["message"] if evs and evs[0].get("reason_code") == "START_NOW_DECLINED"
+                                else None)
+        return st
+
     @app.post("/api/mode")
     def set_mode(req: ModeRequest):
         ctrl().set_mode(req.mode, req.minutes, req.maintenance)

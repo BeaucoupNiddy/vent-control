@@ -25,6 +25,7 @@ export const api = {
   config: () => req("GET", "/api/config"),
   saveConfig: (c: Json) => req("PUT", "/api/config", c),
   exampleConfig: () => req("GET", "/api/config/example"),
+  startNow: () => req("POST", "/api/start-now"),
   setMode: (mode: string, minutes?: number, maintenance = false) =>
     req("POST", "/api/mode", { mode, minutes, maintenance }),
   history: (range: string, start?: string, end?: string) =>

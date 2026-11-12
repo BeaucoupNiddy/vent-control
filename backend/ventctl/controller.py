@@ -291,6 +291,7 @@ class Controller:
             cond.surface_follow = air_follow
             was_on = gs.is_on
             d = decide(cond, gs, dcfg, g, now, local_hour=local_hour, thermal_params=tp)
+            d = self._maybe_start_now(g, gs, cond, dcfg, d, now, local_hour, tp)
             _track_deferral(gs, d, now)
             prev = self.decisions.get(g.id)
             self.decisions[g.id] = d
@@ -977,6 +978,37 @@ class Controller:
                     g.maintenance = False
                 self.storage.save_config(self.config)
                 return
+
+    def start_now(self, who: str = "user") -> None:
+        """Start the exhaust fans now, then let Automatic stop them by its usual rules (stop gap, RH target,
+        safety). The start skips only the start gap and the minimum off time; it still needs outside air to
+        be drier than the stop gap, the basement above its target and every safety check to pass."""
+        now = self.clock.now()
+        if self.config.mode != Mode.AUTO:
+            self.set_mode(Mode.AUTO, who=who)
+        self._start_now_at = now
+        self.storage.add_event(now, "override", "info", "Start now: run until the gap closes, then stop "
+                               "automatically", "START_NOW", {"by": who})
+
+    def _maybe_start_now(self, g, gs: GroupState, cond, dcfg, d, now: datetime, local_hour, tp):
+        at = getattr(self, "_start_now_at", None)
+        if at is None or self.config.mode != Mode.AUTO:
+            return d
+        if now - at > timedelta(minutes=5) or gs.is_on or d.target_on:
+            self._start_now_at = None
+            return d
+        # judge it as if the fans were already running: the stop thresholds apply, not the start ones
+        running = GroupState(is_on=True, verified=gs.verified, manual_until=gs.manual_until,
+                             maintenance=gs.maintenance)
+        rd = decide(cond, running, dcfg, g, now, local_hour=local_hour, thermal_params=tp)
+        self._start_now_at = None
+        if not rd.target_on:
+            self.storage.add_event(now, "override", "info", "Start now declined. " + rd.explanation,
+                                   "START_NOW_DECLINED", {"group": g.id, "reason": rd.reason_code})
+            return d
+        rd.explanation = ("Started by hand; Automatic stops the fans when the gap closes. "
+                          + rd.explanation.split(": ", 1)[-1])
+        return rd
 
     def set_mode(self, mode: Mode, minutes: float | None = None, maintenance: bool = False, who: str = "user") -> None:
         now = self.clock.now()

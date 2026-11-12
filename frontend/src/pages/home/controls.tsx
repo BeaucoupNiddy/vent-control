@@ -1,4 +1,5 @@
 /* Controls on the Home page: system mode with boost, and one card per fan. */
+import { useState } from "react";
 import { Json, api } from "../../api";
 import { circOn, plugOn, plugPending } from "../../fanstate";
 import { HIcon } from "./icons";
@@ -28,6 +29,17 @@ export function ModeControl({ status, busy, act }: { status: Json; busy: string;
   const g = status.groups && status.groups[0];
   const left = timeUntil(g && g.manual_until, status.now);
   const boosting = mode === "manual_on";
+  const [startNote, setStartNote] = useState("");
+  const startNow = () => act("startnow", async () => {
+    const r: Json = await api.startNow();
+    setStartNote((r && r.start_now_note) || "");
+  });
+  const untilGap = (label: string) => (
+    <button className="h-pill" disabled={!!busy} onClick={startNow}
+      title="Starts the exhaust fans now. Automatic turns them off when the dew-point gap closes to your stop gap, the basement reaches its target, or a safety check needs it.">
+      {busy === "startnow" ? "…" : label}
+    </button>
+  );
   const tiles: [string, string, string, string, () => Promise<unknown>][] = [
     ["auto", "spark", "Automatic", "Runs only when outside air helps", () => api.setMode("auto")],
     ["manual_on", "rocket", "Boost", boosting && left ? `${left} left` : "Run every exhaust fan now", () => api.setMode("manual_on", 60)],
@@ -50,6 +62,7 @@ export function ModeControl({ status, busy, act }: { status: Json; busy: string;
           <>
             <span className="h-boost-text"><span className="h-live-dot" /> <strong>Boosting</strong>{left ? ` for another ${left}` : ""}, then back to Automatic.</span>
             <button className="h-pill" disabled={!!busy} onClick={() => act("mode:auto", () => api.setMode("auto"))}>End boost</button>
+            {untilGap("Stop when the gap closes instead")}
           </>
         ) : (
           <>
@@ -59,9 +72,11 @@ export function ModeControl({ status, busy, act }: { status: Json; busy: string;
                 {busy === `boost:${m}` ? "…" : l}
               </button>
             ))}
+            {untilGap("Until the gap closes")}
           </>
         )}
       </div>
+      {startNote && <p className="h-hint">{startNote.replace(/^Start now declined\. Fans OFF: /, "Couldn't start: ")}</p>}
       {mode === "schedule" && <p className="h-hint">Running on a schedule set in Settings. Choose Automatic to let the app decide.</p>}
       {status.simulation_mode && <p className="h-hint">Practice mode is on: the app decides as usual but no plugs are switched.</p>}
     </div>

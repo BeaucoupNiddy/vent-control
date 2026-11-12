@@ -85,3 +85,11 @@ def test_demo_history_hidden_once_real_sensors_connected(tmp_path):
     assert [r["source"] for r in s.history(*rng)] == ["mock", "measured"]
     s.hide_mock = True
     assert [r["source"] for r in s.history(*rng)] == ["measured"]
+
+
+def test_start_now_endpoint(tmp_path):
+    with client(tmp_path, 0) as c:
+        r = c.post("/api/start-now")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["mode"] == "auto" and "start_now_note" in body

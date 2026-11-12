@@ -213,3 +213,48 @@ def test_long_outage_still_gets_the_safe_startup():
     ctrl2 = Controller(ctrl.config, store, MockSensors(world, clock), MockSwitches(world, clock), clock)
     asyncio.run(ctrl2.startup())
     assert not any(world.switch_on.get(s) for s in ("mock-plug-1", "mock-plug-2"))
+
+
+def test_start_now_is_one_shot_and_logged():
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    run_minutes(ctrl, clock, 1)
+    ctrl.start_now()
+    real = ctrl._maybe_start_now
+
+    calls = {}
+
+    def spy(g_, gs, cond, dcfg, d, now, lh, tp):
+        calls["n"] = calls.get("n", 0) + 1
+        return real(g_, gs, cond, dcfg, d, now, lh, tp)
+    ctrl._maybe_start_now = spy
+    asyncio.run(ctrl.tick())
+    assert calls["n"] == 1
+    assert ctrl._start_now_at is None  # one-shot
+    ev = [e for e in store.events(kind="override") if e["reason_code"].startswith("START_NOW")]
+    assert ev
+
+
+def test_start_now_uses_stop_thresholds():
+    from ventctl.engine import GroupState, decide
+    from ventctl.units import c_to_f
+    from .helpers import air_f, cond as mkcond
+    ctrl, world, clock, store = make()
+    asyncio.run(ctrl.startup())
+    cfg = ctrl.config
+    indoor = air_f(79, 85)
+    td_in = c_to_f(indoor.dew_point_c)
+    c2 = mkcond(indoor, air_f(82, td_f=td_in - 2.0))  # 2 F: between stop (1) and start (3)
+    gs = GroupState()
+    d = decide(c2, gs, cfg, cfg.groups[0], clock.now())
+    assert not d.target_on
+    ctrl._start_now_at = clock.now()
+    d2 = ctrl._maybe_start_now(cfg.groups[0], gs, c2, cfg, d, clock.now(), 12.0, None)
+    assert d2.target_on and d2.explanation.startswith("Started by hand")
+    # below the stop gap it declines and says why
+    c3 = mkcond(indoor, air_f(82, td_f=td_in - 0.5))
+    d = decide(c3, gs, cfg, cfg.groups[0], clock.now())
+    ctrl._start_now_at = clock.now()
+    d3 = ctrl._maybe_start_now(cfg.groups[0], gs, c3, cfg, d, clock.now(), 12.0, None)
+    assert not d3.target_on
+    assert store.events(kind="override")[0]["reason_code"] == "START_NOW_DECLINED"
