@@ -152,6 +152,11 @@ class ChatRequest(BaseModel):
     snapshot_id: str | None = None  # reuse this conversation's snapshot; missing or unknown takes a new one
 
 
+class FanOverride(BaseModel):
+    state: str  # "auto" | "on" | "off"
+    minutes: float | None = None
+
+
 class DismissRequest(BaseModel):
     ids: list[str] | None = None  # None dismisses every current alert
     restore: bool = False  # true shows dismissed alerts again
@@ -329,6 +334,20 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(502, str(e) or type(e).__name__)
         known = {d.host.strip(): d.switch_id for d in sw.tapo_devices}
         return {"plugs": [{**p, "switch_id": known.get(p["host"])} for p in plugs]}
+
+    @app.post("/api/fans/{fid}/override")
+    async def fan_override(fid: str, req: FanOverride):
+        """Switch one exhaust/intake fan by hand: on for a while, held off, or back to automatic."""
+        c = ctrl()
+        if not any(f.id == fid and f.enabled for f in c.config.fans):
+            raise HTTPException(404, "No such fan")
+        if req.state not in ("auto", "on", "off"):
+            raise HTTPException(400, "state must be auto, on or off")
+        if req.minutes is not None and not (1 <= req.minutes <= 24 * 60):
+            raise HTTPException(400, "minutes must be between 1 and 1440")
+        c.set_fan_override(fid, req.state, req.minutes)
+        await c.tick()  # act now instead of at the next decision
+        return c.status()
 
     @app.post("/api/alerts/dismiss")
     def dismiss_alerts(req: DismissRequest):

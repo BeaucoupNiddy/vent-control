@@ -78,7 +78,9 @@ export const api = {
   chatModels: () => req("GET", "/api/chat/models"),
   chat: (messages: { role: string; content: string }[], model?: string, snapshot_id?: string) =>
     req("POST", "/api/chat", { messages, model, snapshot_id }),
-  dismissAlerts: (ids?: string[]) => req("POST", "/api/alerts/dismiss", { ids }),
+  fanOverride: (id: string, state: string, minutes?: number) =>
+    req("POST", `/api/fans/${encodeURIComponent(id)}/override`, { state, minutes }),
+  dismissAlerts:(ids?: string[]) => req("POST", "/api/alerts/dismiss", { ids }),
   restoreAlerts: () => req("POST", "/api/alerts/dismiss", { restore: true }),
   resetData: (scope: string, at?: string) => req("POST", "/api/data/reset", { scope, at }),
   mockState: () => req("GET", "/api/mock/state"),

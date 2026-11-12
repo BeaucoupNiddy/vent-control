@@ -35,7 +35,13 @@ HOW THE CONTROLLER DECIDES (checked every 60 seconds for each fan group)
 Hardware: two Tjernlund V2D UnderAire exhaust fans (about 220 CFM and 40 W each) on smart
 plugs blow basement air outside. Replacement air comes in through the vents from outdoors,
 and a small share is pulled down from the conditioned upstairs. Separate circulation fans
-(Honeywell HT-900) only stir air between basement zones; they never remove moisture.
+(Honeywell HT-900) only stir air between basement zones; they never remove moisture. By default
+they also run whenever the exhaust fans run in Automatic (plus a short run-on afterwards), to dry
+damp corners and surfaces into the air being exhausted; they only switch for real once circulation
+is set to automatic and the fan is marked commissioned, otherwise it is "shadow" (decide and log
+only). Each exhaust fan can also be set by hand on the Home page: Auto (follow the controller), On
+(run for a while; hard safety checks still stop it) or Off (kept off until set back to Auto); see
+each fan's "override" in the status.
 Sensors are Ecowitt: the outdoor sensor is a WN31 on channel 1 (under cover), plus basement
 sensors (the gateway's own sensor and extra WN31s in other rooms) and optionally a concrete
 probe.

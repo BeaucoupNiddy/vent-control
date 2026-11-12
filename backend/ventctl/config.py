@@ -158,6 +158,9 @@ class CirculationSettings(BaseModel):
     temp_uncertainty_f: float = Field(0.5, ge=0, le=5)
     horizon_min: float = Field(30, ge=5, le=240)
     ventilation_support: bool = True
+    run_with_exhaust: bool = Field(True, description="Run every circulation fan whenever the exhaust fans run in "
+                                                      "Automatic, so damp corners and surfaces dry into the air being "
+                                                      "exhausted. Condensation and safety checks still apply")
     post_ventilation_min: float = Field(15, ge=0, le=240, description="Keep supporting fans on after exterior "
                                                                       "ventilation stops")
     condensation_aware: bool = True
