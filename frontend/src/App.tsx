@@ -42,7 +42,11 @@ export default function App() {
     const t = setInterval(refresh, 5000);
     return () => clearInterval(t);
   }, [refresh]);
-  useEffect(() => { location.hash = tab; }, [tab]);
+  useEffect(() => {
+    location.hash = tab;
+    // keep the chosen tab visible in the scrolling tab row on phones
+    document.querySelector(".nav button.active")?.scrollIntoView({ block: "nearest", inline: "center" });
+  }, [tab]);
   useEffect(() => {
     const onHash = () => {
       const h = decodeURIComponent(location.hash.slice(1));

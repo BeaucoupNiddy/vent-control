@@ -260,3 +260,22 @@ ul.plain { list-style: none; padding: 0; margin: 8px 0 0; display: grid; gap: 4p
 .alert-x:hover { color: var(--text); background: color-mix(in srgb, var(--text) 8%, transparent); }
 .chat-notice { align-self: center; font-size: 12px; padding: 2px 0; }
 .chat-usage { margin-top: 6px; font-size: 11px; }
+
+/* compact top bar on phones: one line for the title, one scrollable line for the tabs */
+@media (max-width: 640px) {
+  .topbar { gap: 6px 8px; padding: 8px 12px 0; flex-wrap: wrap; }
+  .topbar .brand { order: 1; gap: 6px; min-width: 0; }
+  .topbar .brand h1 { font-size: 16px; white-space: nowrap; }
+  .topbar .brand .badge { font-size: 11px; padding: 2px 6px; }
+  .topbar .brand .badge.mock { display: none; }
+  .topbar .spacer { order: 2; }
+  .topbar > .seg { order: 3; }
+  .topbar > .seg button { padding: 3px 8px; font-size: 13px; }
+  .topbar .nav {
+    order: 4; width: calc(100% + 24px); margin: 0 -12px; padding: 0 8px 6px;
+    flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    mask-image: linear-gradient(to right, transparent 0, #000 12px, #000 calc(100% - 20px), transparent 100%);
+  }
+  .topbar .nav::-webkit-scrollbar { display: none; }
+  .topbar .nav button { flex: none; padding: 6px 10px; font-size: 14px; }
+}
