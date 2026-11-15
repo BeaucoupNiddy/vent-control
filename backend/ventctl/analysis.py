@@ -13,6 +13,7 @@ Labels matter here:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta
 
 from .airflow import ventilation_effect
@@ -214,7 +215,14 @@ def recorded_profile(rows: list[dict], name: str = "Recorded outdoor conditions"
 def range_for(key: str, now: datetime, start: str | None = None, end: str | None = None) -> tuple[datetime, datetime]:
     if key == "custom" and start and end:
         return datetime.fromisoformat(start), datetime.fromisoformat(end)
-    days = {"24h": 1, "7d": 7, "30d": 30, "90d": 90, "365d": 365, "all": 3650}.get(key, 1)
+    days = {"24h": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90, "365d": 365, "all": 3650}.get(key)
+    if days is None:
+        # accept any "<n>h" / "<n>d" key so a new chart range never silently falls back to 24 h
+        m = re.fullmatch(r"(\d+)([hd])", key or "")
+        if m:
+            n = int(m.group(1))
+            return now - (timedelta(hours=n) if m.group(2) == "h" else timedelta(days=n)), now
+        days = 1
     return now - timedelta(days=days), now
 
 

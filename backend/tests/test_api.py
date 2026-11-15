@@ -93,3 +93,13 @@ def test_start_now_endpoint(tmp_path):
         assert r.status_code == 200
         body = r.json()
         assert body["mode"] == "auto" and "start_now_note" in body
+
+
+def test_range_for_three_days_and_generic_keys():
+    from datetime import datetime, timedelta, timezone
+    from ventctl import analysis
+    now = datetime(2026, 11, 15, tzinfo=timezone.utc)
+    for key, delta in [("3d", timedelta(days=3)), ("24h", timedelta(days=1)), ("7d", timedelta(days=7)),
+                       ("14d", timedelta(days=14)), ("48h", timedelta(hours=48)), ("bogus", timedelta(days=1))]:
+        s, e = analysis.range_for(key, now)
+        assert e == now and now - s == delta, key
