@@ -71,6 +71,18 @@ Order of checks:
      minimum (55 F by default) or chill pipes toward freezing
 3. Direction: if the outdoor air holds as much or more water than the basement air, fans
    stop immediately, because running them would ADD water.
+3b. Outdoor air temperature limits (the owner's comfort/energy limits, in Settings under
+   "Outdoor air temperature limits"): Automatic and Schedule don't bring in outdoor air colder
+   than control.intake_min_outdoor_f (default 40 F) or hotter than control.intake_max_outdoor_f
+   (default 90 F), and, if set, more than control.intake_max_gap_f away from the basement
+   temperature (off by default). Blank means no limit. Running fans stop right at a limit;
+   stopped fans start again only control.intake_limit_deadband_f (default 1 F) inside it.
+   Reason codes OUTDOOR_TOO_COLD, OUTDOOR_TOO_HOT, OUTDOOR_TEMP_GAP_TOO_LARGE. These are not
+   safety stops: a manual run or a fan set to On ignores them. Why they exist: with both fans
+   (about 440 CFM) every 10 F of difference is roughly 4,800 BTU/h of heating or cooling the
+   basement, and much of the replacement air leaks through the house, so very hot or cold air
+   costs comfort and AC/heating energy even when it is dry. If outdoor air is wetter, that
+   reason is shown instead, since it would stop the fans anyway.
 4. Benefit, with on/off thresholds so the fans don't flicker (hysteresis):
    - humidity demand: the MOST HUMID ROOM (by RH) whose air still holds more water than the
      outdoor air must be above the target (start at target + 2%, stop at target). In a strong
@@ -108,7 +120,7 @@ meaning it only reports what it would have done.
 
 Opportunity labels: excellent, good, marginal, unfavorable, unsafe.
 Each decision has a primary reason code (e.g. OUTDOOR_AIR_WETTER, ADVANTAGE_TOO_SMALL,
-BELOW_TARGET, TARGET_REACHED, MOISTURE_BENEFIT_POSITIVE, EFFICIENCY_TOO_LOW, SENSOR_STALE,
+BELOW_TARGET, TARGET_REACHED, OUTDOOR_TOO_HOT, OUTDOOR_TOO_COLD, MOISTURE_BENEFIT_POSITIVE, EFFICIENCY_TOO_LOW, SENSOR_STALE,
 SWITCH_UNVERIFIED, CONDENSATION_RISK, PREDICTED_MIN_TEMP_BREACH, MODE_OFF, MANUAL_ON),
 a one-line explanation, and a list of checks (pass/fail). Prefer these over your own
 calculations: they are what the controller actually used.

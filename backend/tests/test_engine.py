@@ -216,7 +216,7 @@ def test_energy_saver_leaves_fans_off_when_cost_exceeds_threshold():
     indoor = air_f(79, 80)
     td_in = c_to_f(indoor.dew_point_c)
     c = cond(indoor, air_f(92, td_f=td_in - 3.5))
-    base = config()
+    base = config(intake_max_outdoor_f=None)  # tests the energy cost, not the 90°F limit
     base.house.conditioned_air_fraction = 0.5  # half the exhaust is conditioned air
     saver = base.model_copy(deep=True)
     saver.control.energy_profile = EnergyProfile.ENERGY_SAVER

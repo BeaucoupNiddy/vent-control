@@ -13,6 +13,9 @@ Order of evaluation (first failure wins):
      prediction, pipe freeze warning) -> immediate shutdown, ignores minimum
      on/off timers. Applies to both control policies.
   3. moisture direction: outdoor wetter -> immediate stop (it adds moisture)
+  3b. owner's outdoor air temperature limits (control.intake_*: coldest/hottest outdoor air,
+     optional max indoor-outdoor gap) -> immediate stop, with a start deadband. Comfort and
+     energy limits, not safety: manual runs ignore them. Schedule mode applies them too.
   4. benefit, by control policy (both respect minimum on/off timers):
      * "moisture" (original): RH target, dew-point advantage, removal rate, efficiency
      * "tamo" (temperature-aware): minimum removal, then a utility in drying-equivalent
@@ -333,6 +336,11 @@ def decide(
                         thermal_block[1] if thermal_block else _thermal_scope(cond, config) if look else
                         "not evaluated", hard=True))
 
+    intake_block, intake_detail = _intake_limits(cond, config, state.is_on)
+    checks.append(Check("intake_temp", "Outdoor air temperature limits",
+                        None if intake_detail is None else intake_block is None,
+                        intake_block[1] if intake_block else intake_detail or "No outdoor temperature limits set"))
+
     bypass = mode == Mode.MANUAL_ON and state.maintenance
 
     if mode == Mode.MANUAL_ON:
@@ -382,6 +390,9 @@ def decide(
                             else "Outside scheduled windows"))
         if not in_window:
             return out(False, "SCHEDULE_OUTSIDE", "Fans OFF: outside the scheduled hours.", immediate=True)
+        if intake_block:
+            reasons.append("OUTDOOR_TEMP_LIMIT")
+            return out(False, intake_block[0], f"Fans OFF: {intake_block[1]}", immediate=True)
         txt = "Fans ON: scheduled run."
         if effect.net_removal_g_h < 0:
             txt += f" Note: ventilation is currently adding moisture ({_gal_h(-effect.net_removal_g_h)})."
@@ -401,6 +412,10 @@ def decide(
         return out(False, "OUTDOOR_WETTER",
                    "Fans OFF: outdoor dew point is higher than basement dew point. Ventilation would add moisture.",
                    immediate=True)
+    if intake_block:
+        # the owner's comfort/energy limit, not a safety stop: it stops at once, and its deadband prevents flicker
+        reasons.append("OUTDOOR_TEMP_LIMIT")
+        return out(False, intake_block[0], f"Fans OFF: {intake_block[1]}", immediate=True)
 
     if policy == ControlPolicy.TAMO:
         return _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons, checks, out, demand)
@@ -592,6 +607,44 @@ def _tamo_decision(cond, state, config, group, now, effect, look, tres, reasons,
             f"Fans ON: outdoor air is considerably drier ({_gal_h(removal)} estimated) and {temp_txt}. "
             f"Ventilation offers worthwhile moisture removal at {rh_pct:.0f}% RH. {terms}")
     return d
+
+
+def _intake_limits(cond: Conditions, config: AppConfig, on: bool) -> tuple[tuple[str, str] | None, str | None]:
+    """Owner's outdoor air temperature limits. Returns (block, detail): block is (code, text) when the fans must
+    not pull in this air; detail describes the limits (None when no limit is set or readings are missing).
+
+    Running fans stop at the limit; stopped fans start only once the air is the deadband inside it, so a
+    reading wobbling around the limit does not flick the fans on and off."""
+    c = config.control
+    ind, outd = cond.indoor, cond.outdoor
+    lo, hi, gap = c.intake_min_outdoor_f, c.intake_max_outdoor_f, c.intake_max_gap_f
+    if outd is None or (lo is None and hi is None and gap is None):
+        return None, None
+    db = 0.0 if on else c.intake_limit_deadband_f
+    to = c_to_f(outd.t_c)
+    again = "" if on else f" (fans start again {c.intake_limit_deadband_f:g}°F inside the limit)"
+    if lo is not None and to < lo + db:
+        return ("OUTDOOR_TOO_COLD",
+                f"outdoor air is {to:.0f}°F, colder than your {lo:.0f}°F limit for air brought into the basement"
+                f"{again}."), ""
+    if hi is not None and to > hi - db:
+        return ("OUTDOOR_TOO_HOT",
+                f"outdoor air is {to:.0f}°F, hotter than your {hi:.0f}°F limit for air brought into the basement"
+                f"{again}."), ""
+    if gap is not None and ind is not None:
+        d = to - c_to_f(ind.t_c)
+        if abs(d) > gap - db:
+            return ("OUTDOOR_TEMP_GAP_TOO_LARGE",
+                    f"outdoor air is {abs(d):.0f}°F {'colder' if d < 0 else 'warmer'} than the basement, more than "
+                    f"your {gap:.0f}°F limit{again}."), ""
+    parts = []
+    if lo is not None or hi is not None:
+        rng = (f"between {lo:.0f} and {hi:.0f}°F" if lo is not None and hi is not None else
+               f"at least {lo:.0f}°F" if lo is not None else f"at most {hi:.0f}°F")
+        parts.append(f"Outdoor {to:.0f}°F (allowed {rng})")
+    if gap is not None and ind is not None:
+        parts.append(f"{abs(to - c_to_f(ind.t_c)):.0f}°F from the basement (limit {gap:.0f}°F)")
+    return None, "; ".join(parts) or None
 
 
 def _thermal_scope(cond: Conditions, config: AppConfig) -> str:

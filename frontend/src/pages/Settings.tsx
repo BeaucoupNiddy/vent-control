@@ -51,6 +51,18 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "control.dry_window_advantage_f", label: "Strong drying window: outside drier by (°F dew point)", step: 0.5 },
     { path: "control.dry_window_stop_rh_pct", label: "During a strong window, keep running down to RH (%)", hint: "Dries the wood and concrete, not just the air" },
   ] },
+  { title: "Outdoor air temperature limits",
+    note: "Keeps the exhaust fans from pulling in very hot or very cold outdoor air, even when it is dry. With both fans running (about 440 CFM), every 10°F of difference heats or cools the basement at roughly 4,800 BTU/h, and some of the replacement air comes through the house, so it also costs AC or heating. Automatic and Schedule follow these limits; a manual run doesn't. Leave a box blank for no limit.",
+    fields: [
+    { path: "control.intake_min_outdoor_f", label: "Don't bring in outdoor air colder than (°F)", nullable: true,
+      hint: "Default 40°F. Cool, dry air after a cold front is the best drying air New Orleans gets, so a low limit keeps most of it. The 55°F basement minimum and the pipe and condensation checks still protect you separately." },
+    { path: "control.intake_max_outdoor_f", label: "Don't bring in outdoor air hotter than (°F)", nullable: true,
+      hint: "Default 90°F. Air this hot is rarely drier than the basement here anyway, and it would heat the basement and load the AC." },
+    { path: "control.intake_max_gap_f", label: "Don't run when outside differs from the basement by more than (°F)", nullable: true,
+      hint: "Off by default (blank). Follows the basement through the seasons, e.g. 25 allows 45-95°F air when the basement is 70°F. Setting it low (under about 20) blocks many good fall and winter drying days." },
+    { path: "control.intake_limit_deadband_f", label: "Start again only this far inside a limit (°F)", step: 0.5,
+      hint: "Default 1°F. Running fans stop right at the limit; this gap stops them flicking on and off around it." },
+  ] },
   { title: "Fan control", fields: [
     { path: "control.manual_override_minutes", label: "Default manual override (min)" },
     { path: "control.max_cycles_per_hour_alert", label: "Excessive switching alert (starts/h)" },

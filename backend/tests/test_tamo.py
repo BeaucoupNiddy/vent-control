@@ -25,6 +25,8 @@ from .helpers import T0, air_f, cond, config
 def tcfg(**temperature):
     cfg = config()
     cfg.control.policy = ControlPolicy.TAMO
+    # these scenarios test the graded thermal penalty itself, without the owner's outdoor temperature limits
+    cfg.control.intake_min_outdoor_f = cfg.control.intake_max_outdoor_f = None
     for k, v in temperature.items():
         setattr(cfg.temperature, k, v)
     return cfg

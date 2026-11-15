@@ -212,6 +212,17 @@ class ControlSettings(BaseModel):
     dry_window_stop_rh_pct: float = Field(
         50, ge=30, le=80, description="During a strong drying window a running fan keeps going down to this RH "
                                       "instead of stopping at the target, so the wood and concrete dry too")
+    # Outdoor air temperature limits (comfort/energy guards, not safety): Automatic and Schedule never pull in
+    # outdoor air colder or hotter than these, whatever the drying benefit. Blank = no limit.
+    intake_min_outdoor_f: float | None = Field(
+        40, ge=0, le=80, description="Don't ventilate with outdoor air colder than this (°F). Blank = no limit")
+    intake_max_outdoor_f: float | None = Field(
+        90, ge=60, le=120, description="Don't ventilate with outdoor air hotter than this (°F). Blank = no limit")
+    intake_max_gap_f: float | None = Field(
+        None, ge=5, le=60, description="Don't ventilate when outdoor air differs from the basement by more than "
+                                       "this (°F, either direction). Blank = no limit")
+    intake_limit_deadband_f: float = Field(
+        1, ge=0, le=10, description="Stop at a limit; start again only this far inside it (no flicker)")
     min_removal_g_per_h: float = Field(50, ge=0, description="Minimum estimated net vapor removal to run (Balanced)")
     min_on_minutes: float = Field(15, ge=0, le=240)
     min_off_minutes: float = Field(10, ge=0, le=240)
@@ -253,6 +264,9 @@ class ControlSettings(BaseModel):
             raise ValueError("fan-off dew-point advantage must not exceed fan-on advantage")
         if self.upper_rh_pct < self.target_rh_pct:
             raise ValueError("upper RH threshold must be >= target RH")
+        if (self.intake_min_outdoor_f is not None and self.intake_max_outdoor_f is not None
+                and self.intake_max_outdoor_f - self.intake_min_outdoor_f < 2 * self.intake_limit_deadband_f + 5):
+            raise ValueError("the hottest allowed outdoor air must be well above the coldest allowed")
         return self
 
 
