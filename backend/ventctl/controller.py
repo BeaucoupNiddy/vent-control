@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -158,6 +158,8 @@ class Controller:
     _cmp_samples: list = field(default_factory=list)
     _circ_cycle: dict = field(default_factory=dict)
     _circ_auto_on: set = field(default_factory=set)
+    circ_overview: dict = field(default_factory=dict)
+    _outdoor_air: object = None
     _runtime_cache: tuple | None = None
     _started: bool = False
     _task: asyncio.Task | None = None
@@ -332,6 +334,7 @@ class Controller:
         coloc = set(self.comparison["sensor_ids"]) if self.comparison else set()
         zs = zones_mod.zone_statuses(snap, cfg, self.zone_tracker, now, coloc)
         self.zone_status = zs
+        self._outdoor_air = allc.outdoor
         self.basement_avg = zones_mod.basement_average(zs, cfg, snap, self.zone_tracker, now)
         ss = surf_mod.surface_statuses(snap, cfg, zs, self.surface_tracker, now, fallback=allc.indoor,
                                        outdoor=allc.outdoor, forecast=fc)
@@ -439,8 +442,35 @@ class Controller:
                 self.storage.add_event(now, "circulation", "warning" if d.benefit == "adverse" else "info", text,
                                        "CIRC:" + d.reason_code,
                                        {"circulator": c.id, "target_on": d.target_on, "shadow": shadow,
+                                        "previous_state": "ON" if (prev and prev.target_on) else "OFF",
+                                        "requested_state": "ON" if d.target_on else "OFF",
+                                        "confirmed_state": (("ON" if st.is_on else "OFF") if st.verified
+                                                            else "UNKNOWN") if not sim else "SIMULATED",
                                         "benefit": d.benefit, "reasons": d.reasons,
+                                        "minimum_run_seconds": 60 * (cs.min_on_minutes if c.min_on_minutes is None
+                                                                     else c.min_on_minutes),
+                                        "checks": [asdict(k) for k in d.checks],
                                         "predictions": d.predictions})
+        ov = circulation.overview(cfg, self.zone_status, self.surface_status,
+                                  {c.id: self.circ_decisions[c.id] for c in cfg.circulators
+                                   if c.id in self.circ_decisions},
+                                  exterior, self.dehumidifier_running(), self._outdoor_air)
+        prev_mode = (self.circ_overview or {}).get("mode")
+        ov["since"] = (self.circ_overview or {}).get("since") if prev_mode == ov["mode"] else now.isoformat()
+        ov["evaluated_at"] = now.isoformat()
+        ov["next_evaluation"] = (now + timedelta(seconds=cfg.system.decision_seconds)).isoformat()
+        if prev_mode is not None and prev_mode != ov["mode"]:
+            self.storage.add_event(now, "circulation", "warning" if ov["mode"] in (
+                "WATER_INTRUSION_ALERT", "EQUIPMENT_FAULT", "SURFACE_MOISTURE_RISK") else "info",
+                f"Circulation mode: {circulation.MODES.get(prev_mode, prev_mode)} → {ov['mode_label']}"
+                + (" (shadow: fans not switched)" if cs.mode != "auto" else ""),
+                "CIRC_MODE:" + ov["mode"],
+                {"previous_mode": prev_mode, "mode": ov["mode"], "fans": ov["fans_driving"],
+                 "inputs": {"zone_spread_f": ov["zone_dew_point_spread_f"], "maximum_zone_rh": ov["max_rh_pct"],
+                            "concrete_surface_rh": ov["concrete"].get("surface_rh_pct"),
+                            "concrete_margin_f": ov["concrete"].get("conservative_margin_f"),
+                            "outdoor_ventilation": "ON" if exterior.get("on") else "OFF"}})
+        self.circ_overview = ov
 
     async def _command_circ(self, c, st, on: bool, reason: str, now: datetime) -> None:
         if not c.switch_id:
@@ -1466,6 +1496,7 @@ class Controller:
                               "source": surf_mod.air_follow_fraction(self.config, self.surface_learned)[1],
                               "learned": self.surface_learned},
             "circulation": {"mode": self.config.circulation.mode, "circulators": self._circ_status(now),
+                            "overview": self.circ_overview or None,
                             "elevated_rh_pct": self.config.circulation.elevated_rh_pct},
             "comparison": self.comparison_status() if self.comparison else {"active": False},
             "dehumidifier": None if not self.config.dehumidifier.enabled else {

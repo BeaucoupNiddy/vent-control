@@ -333,15 +333,17 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
           </Panel>
         )}
         {circs.length > 0 && (
-          <Panel icon="fan" title="Circulation fans" sub="Mix the air; they don't remove water" className="h-span-2"
+          <Panel icon="fan" title="Circulation fans" className="h-span-2"
+            sub={circ.overview ? `${circ.mode === "auto" ? "" : "Would be: "}${circ.overview.mode_label} · they mix air, they don't remove water` : "Mix the air; they don't remove water"}
             right={<Seg value={circ.mode} options={CIRC_MODES} label="Circulation automation"
               onChange={(v) => act(`circmode:${v}`, () => api.circulationMode(v))} />}>
             <div className="h-fancards h-fancards-2">
-              {circs.map((c) => <CircFanCard key={c.id} c={c} circMode={circ.mode} status={status} busy={busy} act={act} />)}
+              {circs.filter((c) => c.enabled !== false).map((c) => <CircFanCard key={c.id} c={c} circMode={circ.mode} status={status} busy={busy} act={act} />)}
             </div>
             <p className="h-hint">
               {circ.mode === "shadow" ? "Learning: the app works out when these would help but leaves the plugs alone. " : circ.mode === "auto" ? "Automatic: the app runs these when mixing helps, and alongside the exhaust fans. " : "Automation is off. "}
               On and Off here last one hour, then go back to Auto.
+              {circ.overview && circ.overview.concrete && circ.overview.concrete.state !== "ok" ? " No concrete probe reading yet, so surface-drying fans stay off in Automatic." : ""}
             </p>
           </Panel>
         )}

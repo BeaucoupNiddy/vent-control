@@ -53,6 +53,8 @@ class CircState:
     post_vent_until: datetime | None = None
     last_reason: str | None = None
     manual_ended: bool = False  # a manual override just ended; return the fan to OFF unless automation runs it
+    trigger_since: datetime | None = None  # when a zone difference first called for this fan (activation delay)
+    dehum_post_until: datetime | None = None
 
 
 @dataclass
@@ -159,6 +161,10 @@ def decide_circulator(
     checks: list[CircCheck] = []
     reasons: list[str] = []
     conns = [k for k in config.connections if k.circulator_id == circ.id]
+    # zones this fan affects: both ends of its connections, else the zone it sits in
+    fan_zones = sorted({z for k in conns for z in (k.zone_a, k.zone_b)} | ({circ.zone} if circ.zone else set()))
+    min_on = cs.min_on_minutes if circ.min_on_minutes is None else circ.min_on_minutes
+    min_off = cs.min_off_minutes if circ.min_off_minutes is None else circ.min_off_minutes
     commissioned = circ.commissioned if commissioned_override is None else commissioned_override
     commanding = cs.mode == "auto" and circ.auto_enabled and commissioned
 
@@ -172,7 +178,7 @@ def decide_circulator(
         if state.last_reason == "SCHEDULED_MIXING" and not on:
             immediate = True
         if not (safety or immediate) and state.last_change is not None and on != state.is_on:
-            need = cs.min_on_minutes if state.is_on else cs.min_off_minutes
+            need = min_on if state.is_on else min_off
             elig = state.last_change + timedelta(minutes=need)
             if now < elig:
                 d.held = True
@@ -205,8 +211,8 @@ def decide_circulator(
     if cs.mode == "off":
         return out(False, "CIRCULATION_AUTOMATION_OFF", "OFF: circulation automation is turned off.", immediate=True)
 
-    if not conns:
-        checks.append(CircCheck("graph", "Zone connection", None, "Not assigned to a connection"))
+    if not conns and not circ.zone:
+        checks.append(CircCheck("graph", "Zone connection", None, "Not assigned to a connection or zone"))
 
     # predictions for every connection this fan serves
     preds = []
@@ -269,6 +275,8 @@ def decide_circulator(
     # 4/5. localized humidity and beneficial mixing
     beneficial = []
     notes = []
+    waiting: list[str] = []
+    any_raw_trigger = False
     for p in preds:
         za, zb = zones[p["zone_a"]], zones[p["zone_b"]]
         target, other = (za, zb) if za.air.rh >= zb.air.rh else (zb, za)
@@ -287,6 +295,25 @@ def decide_circulator(
                       (mins.get("elevated") or 0) >= cs.elevated_persist_min)
         dw_need = cs.min_dw_stop_g_kg if state.is_on else cs.min_dw_start_g_kg
         grad_trigger = (g["reliable"] and g["dw_g_kg"] >= dw_need and target.air.rh * 100 >= cs.observe_rh_pct)
+        # dew-point spread (spec: start at 3°F, keep going until 2°F). Compared by dew point, never by RH,
+        # so a cool zone with a high RH but less water does not count as the wetter one.
+        dp_gap = delta_c_to_f(target.air.dew_point_c - other.air.dew_point_c)
+        p["dew_point_spread_f"] = dp_gap
+        # only a gap larger than the combined sensor uncertainty counts
+        spread_trigger = g["reliable"] and dp_gap >= (cs.dewpoint_spread_off_f if state.is_on
+                                                     else cs.dewpoint_spread_on_f)
+        if (grad_trigger or spread_trigger) and not persistent:
+            any_raw_trigger = True
+            state.trigger_since = state.trigger_since or now
+            waited = (now - state.trigger_since).total_seconds() / 60
+            if not state.is_on and waited < cs.exchange_delay_min:
+                waiting.append(f"{target.name} is {dp_gap:.1f}°F dew point above {other.name}; starting if it lasts "
+                               f"{cs.exchange_delay_min - waited:.0f} more min")
+                continue
+        if spread_trigger:
+            grad_trigger = True
+        lasted = (f" for {(now - state.trigger_since).total_seconds() / 60:.0f} min"
+                  if state.trigger_since and now > state.trigger_since else "")
         improves = drop >= cs.min_rh_improvement_pct and (orh_on < cs.elevated_rh_pct or rise < 0.5 * drop)
         p["rh_drop_target_pct"], p["rh_rise_other_pct"] = drop, rise
         if not (persistent or grad_trigger):
@@ -297,10 +324,10 @@ def decide_circulator(
             if g["reason"] in ("GRADIENT_WITHIN_SENSOR_UNCERTAINTY", "SENSOR_COMPARISON_ACTIVE"):
                 reasons.append(g["reason"])
             continue
-        if g["reliable"] and g["dw_g_kg"] > 0:
+        if (g["reliable"] and g["dw_g_kg"] > 0) or spread_trigger:
             kind = "ZONE_MOISTURE_GRADIENT"
-            why = (f"{target.name} holds {g['dw_g_kg']:.2f} g/kg more water than {other.name} "
-                   f"(beyond the ±{g['uncertainty_g_kg']:.2f} sensor uncertainty)")
+            why = (f"{target.name}'s dew point is {dp_gap:.1f}°F above {other.name}'s{lasted} "
+                   f"({g['dw_g_kg']:.2f} g/kg more water, sensor uncertainty ±{g['uncertainty_g_kg']:.2f})")
         else:
             kind = "COOL_ZONE_WARMING"
             why = (f"{target.name} has higher RH mainly because it is cooler; its moisture content is about the same as "
@@ -308,6 +335,8 @@ def decide_circulator(
             reasons.append(g["reason"] if g["reason"] != "ZONE_MOISTURE_GRADIENT" else "RH_DIFFERENCE_FROM_TEMPERATURE")
         level = "LOCAL_HUMIDITY_HIGH" if persistent else "BENEFICIAL_ZONE_MIXING"
         beneficial.append((p, target, other, drop, rise, kind, why, level))
+    if not any_raw_trigger:
+        state.trigger_since = None
 
     removal_path = bool(exterior.get("drying")) or bool(dehumidifier_running)
     all_humid = all(z.air is not None and z.air.rh * 100 >= cs.elevated_rh_pct for z in zones.values() if z.ok) and \
@@ -325,6 +354,34 @@ def decide_circulator(
                    f"ON: mixing should bring lower-dew-point air to {s.name} (predicted conservative margin "
                    f"{m_on:.1f}°F vs {m_off:.1f}°F with the fan off).{no_removal_txt}", "beneficial", preds=preds)
 
+    # surface-drying fans blow across concrete: they need a working probe in their area and a surface that
+    # is not already near saturation before they run for any automatic reason (SURFACE_PROTECTION above
+    # is the one case where the model shows mixing lowers the dew point at the surface)
+    if circ.role == "surface_drying":
+        mine = [s for s in surfaces if (s.zone in fan_zones) or not fan_zones]
+        live = [s for s in mine if s.t_c is not None and s.conservative_margin_f is not None]
+        if not live:
+            checks.append(CircCheck("surface_data", "Concrete probe", None, "No working probe reading for this area"))
+            reasons.append("SURFACE_DATA_MISSING")
+            return out(False, "SURFACE_DATA_MISSING",
+                       "OFF: this fan blows across a damp surface, and there is no working concrete probe reading for "
+                       "its area, so the app cannot tell whether moving air there dries it or adds condensation. "
+                       "Manual control still works.", "uncertain", preds=preds, immediate=True)
+        risky = [s for s in live if s.risk in ("elevated", "possible") or
+                 (s.surface_rh is not None and s.surface_rh * 100 >= ss.surface_rh_elevated_pct)]
+        if risky:
+            s = risky[0]
+            checks.append(CircCheck("surface_data", "Concrete probe", False,
+                                    f"{s.name}: margin {s.conservative_margin_f:.1f}°F, surface RH "
+                                    f"{min(100, (s.surface_rh or 0) * 100):.0f}%"))
+            reasons.append("SURFACE_DRYING_RESTRICTED")
+            return out(False, "SURFACE_DRYING_RESTRICTED",
+                       f"OFF now: {s.name} is close to its dew point (conservative margin "
+                       f"{s.conservative_margin_f:.1f}°F, surface RH about {min(100, (s.surface_rh or 0) * 100):.0f}%), "
+                       "so blowing basement air across it could add moisture rather than dry it.", "adverse",
+                       preds=preds, safety=True)
+        checks.append(CircCheck("surface_data", "Concrete probe", True, "Surface comfortably above its dew point"))
+
     if beneficial:
         p, target, other, drop, rise, kind, why, level = max(beneficial, key=lambda x: x[3])
         reasons.append(kind)
@@ -334,6 +391,31 @@ def decide_circulator(
         checks.append(CircCheck("benefit", "Expected benefit", True, f"{target.name} RH −{drop:.1f}% (modeled)"))
         return out(True, level, txt, "beneficial", preds=preds)
 
+    # 5b. dehumidifier support: only on confirmed operation (a power-metering plug); never guessed
+    if circ.role == "dehumidifier_support":
+        dz = config.dehumidifier.zone
+        if not config.dehumidifier.enabled or dehumidifier_running is None:
+            checks.append(CircCheck("dehum", "Dehumidifier", None, "Running state not monitored (needs a "
+                                    "power-metering plug); this fan only uses humidity readings"))
+        elif dehumidifier_running:
+            far = [zones[z] for z in fan_zones if z != dz and zones.get(z) and zones[z].ok]
+            ref = zones.get(dz) if dz and zones.get(dz) and zones[dz].ok else None
+            humid = [z for z in far if z.air.rh * 100 >= cs.elevated_rh_pct or
+                     (ref is not None and (z.air.w - ref.air.w) * 1000 >= cs.min_dw_start_g_kg)]
+            if humid:
+                state.dehum_post_until = now + timedelta(minutes=cs.dehumidifier_post_run_min)
+                reasons.append("DEHUMIDIFIER_SUPPORT")
+                return out(True, "DEHUMIDIFIER_SUPPORT",
+                           f"ON: the dehumidifier is running and {humid[0].name} is more humid "
+                           f"({humid[0].air.rh * 100:.0f}% RH), so this fan moves that air toward it.", "beneficial",
+                           preds=preds)
+            checks.append(CircCheck("dehum", "Dehumidifier", True, "Running; no connected zone needs help"))
+        if (dehumidifier_running is not True and state.dehum_post_until and now < state.dehum_post_until
+                and state.last_reason in ("DEHUMIDIFIER_SUPPORT", "POST_DEHUMIDIFIER_RUN")):
+            return out(True, "POST_DEHUMIDIFIER_RUN",
+                       f"ON: finishing a short run after the dehumidifier stopped (until "
+                       f"{state.dehum_post_until.strftime('%H:%M')}).", "uncertain", preds=preds)
+
     # 6. exterior-ventilation support
     ext_on = bool(exterior.get("on"))
     if cs.run_with_exhaust:
@@ -341,14 +423,21 @@ def decide_circulator(
         # only for fans marked to support ventilation, and only where both ends of the fan's connection have
         # a working sensor: an unobserved path is not a demonstrated benefit.
         if exterior.get("auto_on") and exterior.get("drying"):
-            missing = sorted({z for k in conns for z in (k.zone_a, k.zone_b)
-                              if not (zones.get(z) and zones[z].ok)})
+            missing = sorted({z for z in fan_zones if not (zones.get(z) and zones[z].ok)})
+            short = bool(conns) and all(
+                zones.get(k.zone_a) and zones[k.zone_a].on_ventilation_path and
+                zones.get(k.zone_b) and zones[k.zone_b].on_ventilation_path for k in conns)
             if not circ.ventilation_support:
                 checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
                                         "This fan is not marked to support ventilation"))
-            elif not conns:
+            elif not fan_zones:
                 checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
-                                        "Not assigned to a zone connection"))
+                                        "Not assigned to a zone connection or zone"))
+            elif short and cs.avoid_short_circuit:
+                reasons.append("VENTILATION_SHORT_CIRCUIT_RISK")
+                checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
+                                        "Both ends are on the exhaust air path, so it would push incoming air "
+                                        "straight to the exhaust"))
             elif missing:
                 reasons.append("RUN_WITH_EXHAUST_NO_DATA")
                 checks.append(CircCheck("with_exhaust", "Run with exhaust", False,
@@ -410,6 +499,8 @@ def decide_circulator(
         reasons.append("ZONE_SENSOR_UNAVAILABLE")
         return out(False, "ZONE_SENSOR_UNAVAILABLE", f"OFF: no usable reading for {names}; humidity-based "
                    "circulation for this connection is paused.", "uncertain", preds=preds)
+    if waiting:
+        return out(False, "ZONE_DIFFERENCE_PENDING", "OFF for now: " + "; ".join(waiting) + ".", "none", preds=preds)
     if notes:
         return out(False, "NO_CLEAR_BENEFIT", "OFF: " + "; ".join(notes) + ".", "none", preds=preds)
     if calm and cs.energy_optimization:
@@ -426,3 +517,118 @@ def runtime_today(intervals: list[tuple[datetime, datetime]], start: datetime, e
         if hi > lo:
             total += (hi - lo).total_seconds()
     return total / 3600
+
+
+# ---------------------------------------------------------------- overview (one resolved mode)
+MODES = {
+    "WATER_INTRUSION_ALERT": "Water alert: fans held off",
+    "EQUIPMENT_FAULT": "Equipment fault",
+    "SURFACE_MOISTURE_RISK": "Protecting the concrete",
+    "DEHUMIDIFIER_SUPPORT": "Helping the dehumidifier",
+    "VENTILATION_ASSIST": "Spreading incoming outside air",
+    "ENHANCED_MIXING": "Evening out damp zones",
+    "NORMAL_MIXING": "Routine mixing",
+    "MANUAL": "Manual control",
+    "IDLE": "Resting",
+}
+_MODE_OF_REASON = {
+    "DEHUMIDIFIER_SUPPORT": "DEHUMIDIFIER_SUPPORT", "POST_DEHUMIDIFIER_RUN": "DEHUMIDIFIER_SUPPORT",
+    "RUN_WITH_EXHAUST": "VENTILATION_ASSIST", "POST_EXHAUST_RUN": "VENTILATION_ASSIST",
+    "VENTILATION_SUPPORT": "VENTILATION_ASSIST", "POST_VENTILATION_SUPPORT": "VENTILATION_ASSIST",
+    "LOCAL_HUMIDITY_HIGH": "ENHANCED_MIXING", "BENEFICIAL_ZONE_MIXING": "ENHANCED_MIXING",
+    "SCHEDULED_MIXING": "NORMAL_MIXING", "MANUAL_ON": "MANUAL", "SURFACE_PROTECTION": "SURFACE_MOISTURE_RISK",
+}
+_SURFACE_REASONS = {"CIRCULATION_WORSENS_SURFACE_RISK", "SURFACE_RISK_EFFECT_UNKNOWN", "SURFACE_DRYING_RESTRICTED",
+                    "SURFACE_PROTECTION"}
+_PRIORITY = ["WATER_INTRUSION_ALERT", "EQUIPMENT_FAULT", "SURFACE_MOISTURE_RISK", "DEHUMIDIFIER_SUPPORT",
+             "VENTILATION_ASSIST", "ENHANCED_MIXING", "NORMAL_MIXING", "MANUAL", "IDLE"]
+
+
+def overview(config: AppConfig, zones: dict, surfaces: list, decisions: dict, exterior: dict | None = None,
+             dehumidifier_running: bool | None = None, outdoor: AirState | None = None) -> dict:
+    """One resolved circulation mode plus the measurements behind it, for the dashboard and the log.
+
+    The mode follows a fixed priority (safety, equipment, surface risk, dehumidifier, ventilation,
+    zone mixing, routine mixing, idle). Per-fan decisions stay independent: a higher-priority mode
+    does not force every fan off. A missing concrete probe is reported as unknown, never as safe."""
+    exterior = exterior or {}
+    cs, ss = config.circulation, config.surfaces
+    ok = [z for z in zones.values() if z.ok]
+    dps = [(z, c_to_f(z.air.dew_point_c)) for z in ok]
+    hi = max(dps, key=lambda x: x[1]) if dps else None
+    lo = min(dps, key=lambda x: x[1]) if dps else None
+    max_rh = max(ok, key=lambda z: z.air.rh) if ok else None
+    issues: list[str] = []
+    for z in zones.values():
+        if not z.ok:
+            issues.append(f"{z.name}: no usable reading")
+
+    probes = [s for s in surfaces if s.t_c is not None and s.conservative_margin_f is not None]
+    if not surfaces:
+        concrete = {"state": "not_installed", "label": "No concrete probe yet: concrete condensation risk is unknown, "
+                    "not assumed safe. Surface-drying fans stay off in automatic."}
+        issues.append("No concrete probe")
+    elif not probes:
+        concrete = {"state": "offline", "label": "Concrete probe not reporting: condensation risk is unknown, not "
+                    "assumed safe. Surface-drying fans stay off in automatic."}
+        issues.append("Concrete probe not reporting")
+    else:
+        w = min(probes, key=lambda s: s.conservative_margin_f)
+        concrete = {"state": "ok", "name": w.name, "temp_f": c_to_f(w.t_c), "margin_f": w.margin_f,
+                    "conservative_margin_f": w.conservative_margin_f,
+                    "surface_rh_pct": None if w.surface_rh is None else min(100.0, w.surface_rh * 100),
+                    "risk": w.risk, "label": None}
+    srh = concrete.get("surface_rh_pct")
+    risk_level = ("unknown" if concrete["state"] != "ok" else
+                  "condensation_possible" if concrete["conservative_margin_f"] <= ss.possible_margin_f else
+                  "high" if (srh or 0) >= 90 or concrete["conservative_margin_f"] <= 2 else
+                  "elevated" if (srh or 0) >= ss.surface_rh_elevated_pct or concrete["risk"] == "elevated" else "low")
+
+    dh = config.dehumidifier
+    dehum = {"level": 0 if not dh.enabled else (2 if dh.monitor_switch_id else 1),
+             "running": dehumidifier_running if dh.enabled else None}
+    dehum["label"] = ("Not set up" if not dh.enabled else
+                      "Runs on its own; the app does not know when it is running" if dh.monitor_switch_id == "" else
+                      "Running" if dehumidifier_running else "Off" if dehumidifier_running is False else
+                      "Monitoring plug not responding")
+
+    # resolve one mode by priority
+    found = set()
+    driving: dict[str, list[str]] = {}
+    for cid, d in decisions.items():
+        code = d.reason_code
+        m = None
+        if code == "WATER_INTRUSION_LOCKOUT":
+            m = "WATER_INTRUSION_ALERT"
+        elif code in ("PLUG_UNVERIFIED", "PLUG_UNREACHABLE", "COMMAND_LOCKOUT"):
+            m = "EQUIPMENT_FAULT"
+        elif code in _SURFACE_REASONS:
+            m = "SURFACE_MOISTURE_RISK"
+        elif d.target_on:
+            m = _MODE_OF_REASON.get(code, "ENHANCED_MIXING" if code == "COOL_ZONE_WARMING" else None)
+        if m:
+            found.add(m)
+            driving.setdefault(m, []).append(cid)
+    if config.control.water_intrusion_lockout:
+        found.add("WATER_INTRUSION_ALERT")
+    if risk_level in ("high", "condensation_possible"):
+        found.add("SURFACE_MOISTURE_RISK")
+    mode = next((m for m in _PRIORITY if m in found), "IDLE")
+    out_dp = c_to_f(outdoor.dew_point_c) if outdoor is not None else None
+    return {
+        "mode": mode, "mode_label": MODES[mode], "fans_driving": driving.get(mode, []),
+        "automation": cs.mode,
+        "fans_on": [cid for cid, d in decisions.items() if d.target_on],
+        "zone_dew_point_max_f": hi[1] if hi else None, "zone_dew_point_max_zone": hi[0].name if hi else None,
+        "zone_dew_point_min_f": lo[1] if lo else None, "zone_dew_point_min_zone": lo[0].name if lo else None,
+        "zone_dew_point_spread_f": (hi[1] - lo[1]) if hi and lo and len(dps) > 1 else None,
+        "spread_on_f": cs.dewpoint_spread_on_f, "spread_off_f": cs.dewpoint_spread_off_f,
+        "max_rh_pct": max_rh.air.rh * 100 if max_rh else None, "max_rh_zone": max_rh.name if max_rh else None,
+        "outdoor_dew_point_f": out_dp,
+        "outdoor_minus_indoor_dew_point_f": (out_dp - hi[1]) if out_dp is not None and hi else None,
+        "concrete": concrete, "surface_risk": risk_level,
+        "exhaust": {"on": bool(exterior.get("on")), "drying": bool(exterior.get("drying"))},
+        "dehumidifier": dehum,
+        "data_issues": issues,
+        "note": "Circulation moves water between zones; it never removes it.",
+    }

@@ -621,7 +621,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
     def get_circulation():
         c = ctrl()
         return {"mode": c.config.circulation.mode, "circulators": c._circ_status(c.clock.now()),
-                "settings": c.config.circulation.model_dump()}
+                "settings": c.config.circulation.model_dump(), "overview": c.circ_overview or None}
 
     @app.post("/api/circulators/{cid}/manual")
     def circulator_manual(cid: str, req: CirculatorManual):

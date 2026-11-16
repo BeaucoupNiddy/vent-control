@@ -201,6 +201,55 @@ const CIRC_MODES = [
   { id: "auto", label: "Automatic" },
 ];
 
+export const ROLE_LABEL: Record<string, string> = {
+  zone_exchange: "Swaps air between zones",
+  surface_drying: "Dries a damp surface",
+  general_mixing: "Stirs one room",
+  dehumidifier_support: "Helps the dehumidifier",
+};
+
+const MODE_CLS: Record<string, string> = {
+  WATER_INTRUSION_ALERT: "crit", EQUIPMENT_FAULT: "crit", SURFACE_MOISTURE_RISK: "warn",
+  DEHUMIDIFIER_SUPPORT: "good", VENTILATION_ASSIST: "good", ENHANCED_MIXING: "good", NORMAL_MIXING: "", MANUAL: "", IDLE: "",
+};
+
+const fToC = (f: number | null | undefined) => (f == null ? null : ((f - 32) * 5) / 9);
+
+/** One resolved circulation mode and the measurements behind it. */
+export function CirculationOverview({ ov, mode }: { ov: Json; mode: string }) {
+  const u = useUnit();
+  if (!ov) return null;
+  const c = ov.concrete || {};
+  const spread = ov.zone_dew_point_spread_f;
+  return (
+    <div className="zone-card" style={{ marginBottom: 12 }}>
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <div className="row">
+          <strong>{mode === "auto" ? "Now" : "Would be"}: {ov.mode_label}</strong>
+          <span className={`badge ${MODE_CLS[ov.mode] || ""}`}>{String(ov.mode).toLowerCase().replace(/_/g, " ")}</span>
+        </div>
+        {ov.since && <span className="faint">since {localTime(ov.since)}</span>}
+      </div>
+      <dl className="kv" style={{ marginTop: 6 }}>
+        <dt>Dew-point spread between zones</dt>
+        <dd>{spread == null ? "—" : deltaTemp(spread, u).replace("+", "")}
+          {ov.zone_dew_point_max_zone && spread != null && <span className="faint"> (wettest: {ov.zone_dew_point_max_zone}; starts at {num(ov.spread_on_f, 1)}°F, stops at {num(ov.spread_off_f, 1)}°F)</span>}</dd>
+        <dt>Highest room RH</dt><dd>{pct(ov.max_rh_pct)}{ov.max_rh_zone && <span className="faint"> ({ov.max_rh_zone})</span>}</dd>
+        <dt>Concrete</dt>
+        <dd>{c.state === "ok"
+          ? <>{temp(fToC(c.temp_f), u)} · {deltaTemp(c.margin_f, u)} above dew point · surface RH about {pct(c.surface_rh_pct)}
+            <span className={`badge ${ov.surface_risk === "low" ? "good" : ov.surface_risk === "elevated" ? "warn" : "crit"}`} style={{ marginLeft: 6 }}>
+              {String(ov.surface_risk).replace(/_/g, " ")} risk</span></>
+          : <span className="muted">{c.label}</span>}</dd>
+        <dt>Exhaust fans</dt><dd>{ov.exhaust?.on ? (ov.exhaust.drying ? "Running, drying" : "Running") : "Off"}
+          {ov.outdoor_minus_indoor_dew_point_f != null && <span className="faint"> (outdoor dew point {deltaTemp(ov.outdoor_minus_indoor_dew_point_f, u)} vs wettest zone)</span>}</dd>
+        <dt>Dehumidifier</dt><dd>{ov.dehumidifier?.label}</dd>
+      </dl>
+      {ov.data_issues?.length > 0 && <p className="faint" style={{ marginBottom: 0 }}>Missing data: {ov.data_issues.join("; ")}.</p>}
+    </div>
+  );
+}
+
 export function CirculationPanel({ status, refresh }: { status: Json; refresh: () => void }) {
   const circ = status?.circulation;
   const [mins, setMins] = useState(30);
@@ -233,6 +282,7 @@ export function CirculationPanel({ status, refresh }: { status: Json; refresh: (
             : "Automatic: commissioned fans are switched by the controller."}{" "}
         Circulation moves water between zones; it never counts as moisture removal.
       </p>
+      <CirculationOverview ov={circ.overview} mode={circ.mode} />
       <div className="grid g2">
         {circ.circulators.map((c: Json) => {
           const d = c.decision;
@@ -250,7 +300,9 @@ export function CirculationPanel({ status, refresh }: { status: Json; refresh: (
                 </span>
               </div>
               <div className="row faint" style={{ marginTop: 4 }}>
-                <span>{c.model} · speed {c.physical_speed}</span>
+                <span>{c.kind === "blower" ? "Blower" : "Fan"} · {ROLE_LABEL[c.role] || c.role}</span>
+                {!c.enabled && <span className="badge">disabled</span>}
+                <span>· {c.model} · speed {c.physical_speed}</span>
                 <span>· plug {c.switch_id || "none"}</span>
                 {c.manual != null ? <span className="badge">manual {c.manual ? "ON" : "OFF"} until {localTime(c.manual_until)}</span>
                   : <span className="badge">{d?.commanding ? "automatic" : circ.mode === "auto" && !c.commissioned ? "not commissioned" : circ.mode}</span>}
@@ -265,7 +317,7 @@ export function CirculationPanel({ status, refresh }: { status: Json; refresh: (
                 </p>
               )}
               <dl className="kv">
-                <dt>Connections</dt><dd>{c.connections.map((k: Json) => `${status.zones?.[k.zone_a]?.name || k.zone_a} ↔ ${status.zones?.[k.zone_b]?.name || k.zone_b}`).join(", ") || "none"}</dd>
+                <dt>Connections</dt><dd>{c.connections.map((k: Json) => `${status.zones?.[k.zone_a]?.name || k.zone_a} ↔ ${status.zones?.[k.zone_b]?.name || k.zone_b}`).join(", ") || (c.zone ? `inside ${status.zones?.[c.zone]?.name || c.zone}` : "none")}</dd>
                 <dt>Runtime today</dt><dd>{hours(c.runtime?.today_h)}</dd>
                 <dt>Runtime this month</dt><dd>{hours(c.runtime?.month_h)}</dd>
                 <dt>Energy this month</dt><dd>{num(c.runtime?.month_kwh, 2)} kWh <span className="faint">({c.energy_label})</span></dd>

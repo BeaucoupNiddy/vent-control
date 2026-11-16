@@ -265,6 +265,34 @@ Version 3 treats the basement as connected zones instead of one well-mixed room.
 - **Shadow mode is the default.** The controller decides and logs what each fan would do but never switches it. Manual ON/OFF always works except under the water-intrusion lockout. Automatic mode switches only fans marked **commissioned**, and the API refuses automatic mode until at least one fan is.
 - **Plug failures:** an unreachable plug shows its state as *unknown*, never as ON or OFF. A command that isn't confirmed is logged and locked out for 30 minutes instead of being retried rapidly. Exterior ventilation and the other fan keep running.
 
+### Fan roles, modes and the exhaust (circulation spec, 2026-11-16)
+
+Any number of circulation fans can be listed (three fans plus an optional blower by default; the
+blower starts disabled). Each has a **job** (`role`) that changes how it is used:
+
+| Job | Runs automatically when | Extra rule |
+|---|---|---|
+| Swap air between zones (`zone_exchange`) | one connected zone's dew point is at least 3°F above the other (beyond sensor uncertainty) for 10 min, or a zone stays humid; stops at 2°F | model must predict a real RH improvement |
+| Dry a damp surface (`surface_drying`) | as above, or to bring drier air to the concrete | needs a working concrete probe in its area and a surface comfortably above its dew point; with no probe it stays off in Automatic (manual still works) |
+| Stir one room (`general_mixing`) | with the exhaust fans, or on the mixing schedule (15 min on / 45 off when enabled) | set "Sits in zone" |
+| Help the dehumidifier (`dehumidifier_support`) | the dehumidifier is **confirmed** running (power-metering plug) and a connected zone is humid; 10 min run-on | never guessed: Tapo P125M plugs have no power meter, so this is Level 1 (no integration) |
+
+Coordination with the exhaust fans: the exhaust controller stays in charge of outside air and is never
+switched on by circulation. While Automatic is drying, fans marked "support ventilation" spread the
+incoming air into zones off the exhaust path; a fan whose two zones are both on the exhaust air path is
+skipped so it doesn't push incoming air straight back out. Circulation still runs on its own when the
+exhaust is off (humid weather).
+
+The controller reports one **circulation mode** by fixed priority: water alert, equipment fault,
+protecting the concrete, helping the dehumidifier, spreading incoming air, evening out zones, routine
+mixing, resting. Decisions stay per fan, so surface risk can stop a surface fan while another fan keeps
+moving drier air elsewhere. Mode changes and fan decisions are logged with their inputs (zone spread,
+max RH, concrete surface RH and margin, exhaust state). A missing concrete probe is shown as "unknown",
+never as safe. Tests: `backend/tests/test_circulation_spec.py` (scenarios A-J).
+
+Not built: water-leak sensors (use the water-intrusion lockout switch), dehumidifier control, and
+before/after comparison of continuous vs intermittent circulation beyond the existing effectiveness view.
+
 ### Commissioning checklist (before automatic circulation)
 
 1. Plug each HT-900 straight into an outlet and check that it runs. Set its speed and confirm the switch stays there.

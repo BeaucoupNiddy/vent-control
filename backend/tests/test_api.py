@@ -51,7 +51,7 @@ def test_v3_zone_surface_circulation_endpoints(tmp_path):
         sf = c.get("/api/surfaces").json()["surfaces"]
         assert sf and sf[0]["zone"] == "damp" and sf[0]["risk"]
         circ = c.get("/api/circulation").json()
-        assert circ["mode"] == "shadow" and len(circ["circulators"]) == 2
+        assert circ["mode"] == "shadow" and len(circ["circulators"]) == 4 and "overview" in circ
         # automation cannot be enabled before commissioning
         assert c.post("/api/circulation/mode", json={"mode": "auto"}).status_code == 400
         r = c.post("/api/circulators/circ-1/manual", json={"state": "on", "minutes": 15}).json()
@@ -61,7 +61,7 @@ def test_v3_zone_surface_circulation_endpoints(tmp_path):
         st = c.get("/api/zones/stats?range=24h").json()
         assert "pocket" in st["zones"] and st["surfaces"]
         eff = c.get("/api/circulation/effectiveness").json()
-        assert len(eff["fans"]) == 2 and "Informational" in eff["label"]
+        assert len(eff["fans"]) == 4 and "Informational" in eff["label"]
         assert c.get("/api/circulation/cycles").status_code == 200
         cmp_ = c.post("/api/sensors/compare", json={"action": "start"}).json()
         assert cmp_["active"] and len(cmp_["sensor_ids"]) == 3

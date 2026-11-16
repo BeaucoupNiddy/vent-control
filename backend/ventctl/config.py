@@ -116,11 +116,26 @@ class ZoneConnection(BaseModel):
     placement: Literal["doorway", "corridor", "in_zone"] = "doorway"
 
 
+CIRC_ROLES = ("zone_exchange", "surface_drying", "general_mixing", "dehumidifier_support")
+
+
 class Circulator(BaseModel):
-    """An internal circulation fan on its own smart plug (ON/OFF only)."""
+    """An internal circulation fan (or blower) on its own smart plug (ON/OFF only).
+
+    Any number can be configured. The role says how the controller uses it; placement and
+    airflow direction are set by hand (zone connections), never inferred from readings."""
 
     id: str
     name: str
+    kind: Literal["fan", "blower"] = Field("fan", description="A blower moves more air through a doorway or duct; "
+                                                             "set its exchange CFM on the zone connection")
+    role: Literal["zone_exchange", "surface_drying", "general_mixing", "dehumidifier_support"] = Field(
+        "zone_exchange", description="zone_exchange: swaps air between zones; surface_drying: blows across a "
+        "damp surface (needs a working concrete probe for automatic runs); general_mixing: stirs one room; "
+        "dehumidifier_support: moves air toward the dehumidifier while it runs")
+    zone: str | None = Field(None, description="Zone the fan sits in (needed for a fan that only mixes one room)")
+    min_on_minutes: float | None = Field(None, ge=0, le=240, description="Blank = the circulation default")
+    min_off_minutes: float | None = Field(None, ge=0, le=240, description="Blank = the circulation default")
     model: str = "Honeywell HT-900"
     switch_id: str = ""
     location: str = ""
@@ -165,16 +180,28 @@ class CirculationSettings(BaseModel):
                                                                       "ventilation stops")
     condensation_aware: bool = True
     periodic_mixing: bool = False
-    mixing_on_min: float = Field(10, ge=1, le=240)
-    mixing_off_min: float = Field(30, ge=1, le=1440)
+    mixing_on_min: float = Field(15, ge=1, le=240)
+    mixing_off_min: float = Field(45, ge=1, le=1440)
     mixing_windows: list[ScheduleWindow] = Field(default_factory=list, description="Empty = any time")
     mixing_fans: list[str] = Field(default_factory=list, description="Empty = all circulators")
     energy_optimization: bool = Field(True, description="Skip circulation when every zone is below the observe "
                                                         "threshold and no surface is at risk")
     manual_override_minutes: float = Field(60, gt=0, le=24 * 60)
+    exchange_delay_min: float = Field(10, ge=0, le=240, description="A zone difference must last this long before a "
+                                                                    "fan starts for it (stops flapping on noisy readings)")
+    dewpoint_spread_on_f: float = Field(3.0, ge=0, le=30, description="Dew-point gap between two zones that starts "
+                                                                      "zone exchange")
+    dewpoint_spread_off_f: float = Field(2.0, ge=0, le=30, description="Keep running until the gap is at or below this")
+    dehumidifier_post_run_min: float = Field(10, ge=0, le=240, description="Keep dehumidifier-support fans on after "
+                                                                           "the dehumidifier stops")
+    avoid_short_circuit: bool = Field(True, description="While the exhaust fans run, skip fans whose connection joins "
+                                                        "two zones that are both on the exhaust air path (they would "
+                                                        "just push incoming air straight to the exhaust)")
 
     @model_validator(mode="after")
     def _check(self) -> "CirculationSettings":
+        if self.dewpoint_spread_off_f > self.dewpoint_spread_on_f:
+            raise ValueError("circulation dew-point stop gap must not exceed the start gap")
         if not (self.observe_rh_pct <= self.elevated_rh_pct <= self.high_rh_pct <= self.critical_rh_pct):
             raise ValueError("circulation RH thresholds must increase: observe <= elevated <= high <= critical")
         if self.min_dw_stop_g_kg > self.min_dw_start_g_kg:
@@ -381,6 +408,7 @@ class Dehumidifier(BaseModel):
     rated_w: float = Field(500, ge=0)
     removal_pints_per_day: float = Field(35, ge=0, description="Estimated real removal at basement conditions")
     monitor_switch_id: str = Field("", description="Power-metering plug feeding the dehumidifier (monitored, never switched)")
+    zone: str | None = Field(None, description="Zone where the dehumidifier draws its air")
     running_threshold_w: float = Field(60, ge=0, description="Above this power draw the compressor is considered running")
     require_ventilation_beats_dehumidifier: bool = Field(
         False, description="Energy Saver: run fans only when ventilation is cheaper per gallon than the dehumidifier")
@@ -484,6 +512,9 @@ class AppConfig(BaseModel):
         for c in self.circulators:
             if c.switch_id and c.switch_id in fan_switches:
                 raise ValueError(f"circulator {c.id} shares smart plug {c.switch_id} with an exterior fan")
+        for c in self.circulators:
+            if zids and c.zone and c.zone not in zids:
+                raise ValueError(f"circulator {c.id} references an unknown zone")
         for k in self.connections:
             if zids and (k.zone_a not in zids or k.zone_b not in zids):
                 raise ValueError(f"connection {k.id} references an unknown zone")
@@ -530,6 +561,7 @@ def example_config() -> AppConfig:
                        physical_speed="medium", ventilation_support=True),
             Circulator(id="circ-2", name="Circulation fan 2", switch_id="mock-plug-3", location="Moisture-prone area",
                        physical_speed="low"),
+            *_extra_circulators(mock_plug="mock-plug-4"),
         ],
         sensors=SensorSettings(
             mappings=[
@@ -548,12 +580,14 @@ def example_config() -> AppConfig:
 
 # Defaults that changed after installs existed. A saved configuration that still holds the old
 # default is moved to the new one once; a value the user changed is left alone.
-DEFAULTS_VERSION = 2
+DEFAULTS_VERSION = 3
 _DEFAULT_UPGRADES: list[tuple[int, str, str, float, float]] = [
     # (version, section, field, old default, new default)
     (1, "house", "moisture_buffer_kg", 25.0, 400.0),  # physics review: materials hold far more water than 25 kg
     (1, "house", "moisture_buffer_tau_h", 12.0, 36.0),
     (2, "surfaces", "probe_uncertainty_f", 1.0, 2.0),  # Ecowitt WN30 manual: ±2°F
+    (3, "circulation", "mixing_on_min", 10.0, 15.0),  # circulation spec: 15 min on, 45 min off
+    (3, "circulation", "mixing_off_min", 30.0, 45.0),
 ]
 
 
@@ -567,4 +601,27 @@ def upgrade_defaults(config: AppConfig, from_version: int) -> list[str]:
         if getattr(obj, name) == old:
             setattr(obj, name, new)
             changes.append(f"{section}.{name}: {old:g} -> {new:g}")
+    if from_version < 3:
+        changes += _add_third_fan_and_blower(config)
     return changes
+
+
+def _extra_circulators(mock_plug: str = "") -> list[Circulator]:
+    return [
+        Circulator(id="circ-3", name="Circulation fan 3", switch_id=mock_plug, location="Main basement", zone="main",
+                   role="general_mixing", physical_speed="medium", ventilation_support=True),
+        Circulator(id="blower", name="Blower (optional)", kind="blower", model="Blower", location="",
+                   role="zone_exchange", rated_w=80, enabled=False),
+    ]
+
+
+def _add_third_fan_and_blower(config: AppConfig) -> list[str]:
+    """Version 3: three circulation fans plus an optional blower. Added only to a setup that still has
+    the two untouched starter fans (no plugs assigned), so a customized list is never changed."""
+    ids = [c.id for c in config.circulators]
+    if ids != ["circ-1", "circ-2"] or any(c.switch_id for c in config.circulators):
+        return []
+    if config.zones and config.zone("main") is None:
+        return []
+    config.circulators.extend(_extra_circulators())
+    return ["circulators: added Circulation fan 3 and an optional blower (off until set up)"]
