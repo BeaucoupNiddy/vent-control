@@ -147,13 +147,15 @@ export function ExhaustFanCard({ f, groupSafety, status, busy, act }: { f: Json;
 export function CircFanCard({ c, circMode, status, busy, act }: { c: Json; circMode: string; status: Json; busy: string; act: Act }) {
   const sw = c.switch || {};
   const on = circOn(c);
-  const reachable = sw.reachable !== false;
+  const noPlug = !c.switch_id;
+  const reachable = noPlug || sw.reachable !== false;
   const manualActive = c.manual != null && (!c.manual_until || new Date(c.manual_until).getTime() > new Date(status.now).getTime());
   const state = manualActive ? (c.manual ? "on" : "off") : "auto";
   const left = manualActive ? timeUntil(c.manual_until, status.now) : null;
   const would = c.decision && c.decision.target_on;
   let note: string;
-  if (!reachable) note = "Smart plug not responding";
+  if (noPlug) note = circMode === "shadow" ? `No smart plug yet · would ${would ? "run" : "rest"} now` : "No smart plug assigned yet (Settings)";
+  else if (!reachable) note = "Smart plug not responding";
   else if (plugPending(sw)) note = `Turning ${sw.commanded ? "on" : "off"} · waiting for the plug to confirm`;
   else if (manualActive) note = `${c.manual ? "On" : "Off"} by you${left ? ` · ${left} left` : ""}`;
   else if (circMode === "shadow") note = `Learning · would ${would ? "run" : "rest"} now`;
@@ -169,10 +171,10 @@ export function CircFanCard({ c, circMode, status, busy, act }: { c: Json; circM
           <strong>{c.name}</strong>
           <span>{note}</span>
         </div>
-        <span className={`h-chip ${!reachable ? "bad" : on ? "good" : "subtle"}`}>{!reachable ? "Offline" : on ? "On" : "Off"}</span>
+        <span className={`h-chip ${!reachable ? "bad" : on ? "good" : "subtle"}`}>{noPlug ? "No plug" : !reachable ? "Offline" : on ? "On" : "Off"}</span>
       </div>
       <div className="fc-specs">
-        <span><HIcon name="home" size={14} /> {c.location || "Basement"}</span>
+        <span><HIcon name="home" size={14} /> {c.location || "Basement"}{c.kind === "blower" ? " · blower" : ""}</span>
         <span><HIcon name="bolt" size={14} /> {sw.power_w > 0.5 ? `${Math.round(sw.power_w)} W now` : `${Math.round(c.rated_w || 0)} W rated`}</span>
         <span><HIcon name="clock" size={14} /> {today != null ? `${today.toFixed(1)} h today` : c.model}</span>
       </div>

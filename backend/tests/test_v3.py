@@ -164,7 +164,7 @@ def test_scenario_c_concrete_below_dew_point_alerts_and_evaluates_fans():
     s = ctrl.surface_status[0]
     assert s.risk == "possible" and s.local_source == "zone"
     # every circulator has a decision that looked at the surface
-    assert set(ctrl.circ_decisions) == {"circ-1", "circ-2"}
+    assert set(ctrl.circ_decisions) == {"circ-1", "circ-2", "circ-3", "blower"}
     d2 = ctrl.circ_decisions["circ-2"]
     assert any(c.id == "surface" for c in d2.checks)
 

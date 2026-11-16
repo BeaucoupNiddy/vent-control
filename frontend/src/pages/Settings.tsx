@@ -150,6 +150,12 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "circulation.mixing_off_min", label: "Mixing: rest (min)" },
     { path: "circulation.energy_optimization", label: "Energy optimization", type: "bool", hint: "Skip circulation when every zone is below the observe threshold" },
     { path: "circulation.manual_override_minutes", label: "Manual override duration (min)" },
+    { path: "circulation.exchange_delay_min", label: "Zone difference must last (min)", hint: "Before a fan starts to even out two zones" },
+    { path: "circulation.dewpoint_spread_on_f", label: "Start when zones differ by (°F dew point)", step: 0.5 },
+    { path: "circulation.dewpoint_spread_off_f", label: "Keep running until within (°F dew point)", step: 0.5 },
+    { path: "circulation.avoid_short_circuit", label: "Don't push incoming air straight to the exhaust", type: "bool",
+      hint: "While the exhaust fans run, skip a fan whose two zones are both on the exhaust air path" },
+    { path: "circulation.dehumidifier_post_run_min", label: "Help-the-dehumidifier fans: keep running after it stops (min)" },
   ] },
   { title: "Concrete surface", note: "Risk classes use the conservative margin: surface temperature minus local dew point, minus the combined probe and dew-point uncertainty. A reading 0.5°F above the dew point is not treated as safe.", fields: [
     { path: "surfaces.monitor_margin_f", label: "Monitor below margin (°F)", step: 0.5 },

@@ -6,6 +6,25 @@ type Change = (p: string, v: Json) => void;
 
 const num = (v: string) => (v === "" ? 0 : Number(v));
 
+const ROLES: [string, string][] = [
+  ["zone_exchange", "Swap air between zones"],
+  ["surface_drying", "Dry a damp surface"],
+  ["general_mixing", "Stir one room"],
+  ["dehumidifier_support", "Help the dehumidifier"],
+];
+
+function newCirc(circs: Json[], kind: "fan" | "blower"): Json {
+  let n = circs.length + 1;
+  const base = kind === "blower" ? "blower" : "circ";
+  while (circs.some((c) => c.id === `${base}-${n}`)) n++;
+  return {
+    id: `${base}-${n}`, name: kind === "blower" ? `Blower ${n}` : `Circulation fan ${n}`, kind, role: "zone_exchange", zone: null,
+    min_on_minutes: null, min_off_minutes: null, model: kind === "blower" ? "Blower" : "Honeywell HT-900", switch_id: "",
+    location: "", physical_speed: "unknown", rated_w: kind === "blower" ? 80 : 30, ventilation_support: false, auto_enabled: true,
+    commissioned: false, enabled: true,
+  };
+}
+
 export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
   const zones: Json[] = cfg.zones || [];
   const conns: Json[] = cfg.connections || [];
@@ -82,12 +101,18 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
           known flood levels, use GFCI-protected outlets, and remember a smart plug does not make a household fan suitable for wet locations.
           The water-intrusion lockout (Safety interlocks) turns every fan off, including manual overrides.</p>
         <div className="table-wrap"><table>
-          <thead><tr><th>Id</th><th>Name</th><th>Location</th><th>Model</th><th>Smart plug</th><th>Speed set on fan</th><th>Watts</th>
+          <thead><tr><th>Id</th><th>Name</th><th>Type</th><th>Job</th><th>Sits in zone</th><th>Location</th><th>Model</th><th>Smart plug</th><th>Speed set on fan</th><th>Watts</th>
             <th>Ventilation support</th><th>Automatic allowed</th><th>Commissioned</th><th>Enabled</th><th /></tr></thead>
           <tbody>{circs.map((c, i) => (
             <tr key={i}>
               <td className="faint">{c.id}</td>
               <td><input value={c.name} style={{ width: 140 }} onChange={(e) => change(`circulators.${i}.name`, e.target.value)} /></td>
+              <td><select value={c.kind || "fan"} onChange={(e) => change(`circulators.${i}.kind`, e.target.value)}>
+                <option value="fan">Fan</option><option value="blower">Blower</option></select></td>
+              <td><select value={c.role || "zone_exchange"} onChange={(e) => change(`circulators.${i}.role`, e.target.value)}>
+                {ROLES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select></td>
+              <td><select value={c.zone ?? ""} onChange={(e) => change(`circulators.${i}.zone`, e.target.value || null)}>
+                <option value="">—</option>{zoneOpts}</select></td>
               <td><input value={c.location} style={{ width: 130 }} onChange={(e) => change(`circulators.${i}.location`, e.target.value)} /></td>
               <td><input value={c.model} style={{ width: 130 }} onChange={(e) => change(`circulators.${i}.model`, e.target.value)} /></td>
               <td><input value={c.switch_id} list="plug-ids" style={{ width: 110 }} onChange={(e) => change(`circulators.${i}.switch_id`, e.target.value)} /></td>
@@ -104,11 +129,20 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
           ))}</tbody>
         </table></div>
         <datalist id="plug-ids">{plugs.map((p) => <option key={p} value={p} />)}</datalist>
-        <button className="btn" style={{ marginTop: 8 }} onClick={() => change("circulators", [...circs, {
-          id: `circ-${circs.length + 1}`, name: `Circulation fan ${circs.length + 1}`, model: "Honeywell HT-900", switch_id: "",
-          location: "", physical_speed: "unknown", rated_w: 30, ventilation_support: false, auto_enabled: true, commissioned: false,
-          enabled: true }])}>Add circulation fan</button>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button className="btn" onClick={() => change("circulators", [...circs, newCirc(circs, "fan")])}>Add circulation fan</button>
+          <button className="btn" onClick={() => change("circulators", [...circs, newCirc(circs, "blower")])}>Add blower</button>
+        </div>
+        <p className="faint"><strong>Jobs:</strong> <em>Swap air between zones</em> runs when one zone holds noticeably more water
+          (by dew point, not RH) than the zone it connects to. <em>Dry a damp surface</em> blows across concrete, so in automatic it only runs
+          with a working concrete probe nearby and the surface comfortably above its dew point. <em>Stir one room</em> needs "Sits in zone" and
+          runs with the exhaust fans or on the mixing schedule. <em>Help the dehumidifier</em> runs only when the app can see the dehumidifier
+          running (a power-metering plug); with the Tapo P125M plugs it cannot, so it falls back to humidity readings.</p>
         <p className="faint">Each circulation fan needs its own plug, separate from the exterior fans. Add the plug under Hardware first.</p>
+        <label className="row" style={{ marginTop: 8 }}>Dehumidifier draws its air from
+          <select value={cfg.dehumidifier?.zone ?? ""} onChange={(e) => change("dehumidifier.zone", e.target.value || null)}>
+            <option value="">—</option>{zoneOpts}</select>
+          <span className="faint">(used by "Help the dehumidifier" fans)</span></label>
       </Card>
     </>
   );
