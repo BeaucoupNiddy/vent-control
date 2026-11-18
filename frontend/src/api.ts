@@ -71,6 +71,8 @@ export const api = {
   simZoneStrategies: () => req("GET", "/api/sim/zones/strategies"),
   updateInfo: () => req("GET", "/api/update"),
   updateNow: () => req("POST", "/api/update"),
+  restartInfo: () => req("GET", "/api/restart"),
+  restartNow: () => req("POST", "/api/restart"),
   setup: (probe = true) => req("GET", `/api/setup?probe=${probe}`),
   setupProgress: (body: Json) => req("PUT", "/api/setup/progress", body),
   setupReset: () => req("POST", "/api/setup/reset"),
