@@ -122,6 +122,29 @@ def _iso(t: datetime) -> str:
     return t.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+def _readings_present(r: dict) -> tuple[bool, bool]:
+    return r.get("indoor_t_c") is not None, r.get("outdoor_t_c") is not None
+
+
+def _downsample(rows: list[dict], max_points: int) -> list[dict]:
+    """Thin rows evenly, but always keep the newest row and the rows on each side of a sensor outage.
+
+    Plain striding dropped the newest rows and could leave a single reading after an outage, which a
+    line chart can't draw, so the charts looked stuck at the start of the outage after it had ended.
+    """
+    keep = {len(rows) - 1}
+    edges = set()
+    for i in range(1, len(rows)):
+        if _readings_present(rows[i]) != _readings_present(rows[i - 1]):
+            edges.update((i - 1, i))
+    if len(edges) <= max_points // 4:  # a flapping sensor must not crowd out the even sample
+        keep |= edges
+    budget = max(max_points - len(keep), 1)
+    stride = len(rows) / budget
+    keep.update(int(i * stride) for i in range(budget))
+    return [rows[i] for i in sorted(keep)]
+
+
 class Storage:
     def __init__(self, path: str | Path):
         self.path = str(path)
@@ -265,8 +288,7 @@ class Storage:
             r["surfaces"] = json.loads(r["surfaces"]) if r.get("surfaces") else {}
             r["devices"] = json.loads(r["devices"]) if r.get("devices") else None
         if len(out) > max_points:
-            stride = len(out) / max_points
-            out = [out[int(i * stride)] for i in range(max_points)]
+            out = _downsample(out, max_points)
         return out
 
     def add_circulation_cycle(self, row: dict) -> int:
