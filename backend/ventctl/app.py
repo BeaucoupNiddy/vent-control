@@ -432,9 +432,11 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         return st
 
     @app.post("/api/mode")
-    def set_mode(req: ModeRequest):
-        ctrl().set_mode(req.mode, req.minutes, req.maintenance)
-        return ctrl().status()
+    async def set_mode(req: ModeRequest):
+        c = ctrl()
+        c.set_mode(req.mode, req.minutes, req.maintenance)
+        await c.tick()  # switch the plugs now, not at the next one-minute decision
+        return c.status()
 
     @app.get("/api/history")
     def history(range: str = "24h", start: str | None = None, end: str | None = None, max_points: int = 1500):
@@ -653,7 +655,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
                 "settings": c.config.circulation.model_dump(), "overview": c.circ_overview or None}
 
     @app.post("/api/circulators/{cid}/manual")
-    def circulator_manual(cid: str, req: CirculatorManual):
+    async def circulator_manual(cid: str, req: CirculatorManual):
         if req.state not in ("on", "off", "auto"):
             raise HTTPException(400, "state must be on, off or auto")
         if req.minutes is not None and not (1 <= req.minutes <= 24 * 60):
@@ -662,10 +664,11 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             ctrl().set_circulator_manual(cid, req.state, req.minutes)
         except KeyError:
             raise HTTPException(404, "unknown circulator")
+        await ctrl().tick()  # switch the plug now, not at the next one-minute decision
         return get_circulation()
 
     @app.post("/api/circulation/mode")
-    def circulation_mode(req: CirculationModeRequest):
+    async def circulation_mode(req: CirculationModeRequest):
         if req.mode not in ("off", "shadow", "auto"):
             raise HTTPException(400, "mode must be off, shadow or auto")
         c = ctrl()
@@ -673,6 +676,7 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(400, "No circulation fan is marked as commissioned. Complete the commissioning "
                                      "checklist in Settings > Internal Air Circulation first.")
         c.set_circulation_mode(req.mode)
+        await c.tick()
         return get_circulation()
 
     @app.get("/api/circulation/cycles")
