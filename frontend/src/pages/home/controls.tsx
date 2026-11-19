@@ -184,4 +184,46 @@ export function CircFanCard({ c, circMode, status, busy, act }: { c: Json; circM
   );
 }
 
+/* ---------- dehumidifier on a smart plug ---------- */
+
+export function DehumCard({ d, status, busy, act }: { d: Json; status: Json; busy: string; act: Act }) {
+  const sw = d.switch || {};
+  const on = plugOn(sw);
+  const reachable = sw.reachable !== false;
+  const o = d.override as { state: string; until: string | null } | null;
+  const state = (o && o.state) || "auto";
+  const left = o && o.until ? timeUntil(o.until, status.now) : null;
+  const dec = d.decision || {};
+  const rh = dec.control_rh_pct;
+  let note: string;
+  if (!reachable) note = "Smart plug not responding";
+  else if (plugPending(sw)) note = `Turning ${sw.commanded ? "on" : "off"} · waiting for the plug to confirm`;
+  else if (state === "off") note = "Held off by you";
+  else if (state === "on") note = on ? `On by you${left ? ` · ${left} left` : ""}` : "Paused for safety";
+  else if (!d.commissioned) note = `Not commissioned yet · would ${dec.target_on ? "run" : "rest"} now`;
+  else if (dec.held && dec.next_eligible_switch) note = `Automatic · ${on ? "running" : "resting"} (compressor protection)`;
+  else note = on ? `Automatic · drying to ${Math.round(d.setpoint_rh_pct)}%` : `Automatic · starts at ${Math.round(d.start_rh_pct)}%`;
+  const runFor = on && d.running_s ? minutesText(d.running_s / 60) : null;
+  const kb = "dehum";
+  return (
+    <div className={`h-fancard ${on ? "on" : ""} ${!reachable ? "offline" : ""}`}>
+      <div className="fc-top">
+        <span className="fc-dehum"><HIcon name="dehum" size={26} /></span>
+        <div className="fc-name">
+          <strong>{d.name || "Dehumidifier"}</strong>
+          <span>{note}</span>
+        </div>
+        <span className={`h-chip ${!reachable ? "bad" : on ? "good" : "subtle"}`}>{!reachable ? "Offline" : on ? "On" : "Off"}</span>
+      </div>
+      <div className="fc-specs">
+        <span><HIcon name="drop" size={14} /> {rh != null ? `${Math.round(rh)}% ${dec.control_source ? `· ${dec.control_source}` : ""}` : "no reading"}</span>
+        <span><HIcon name="bolt" size={14} /> {sw.power_w > 0.5 ? `${Math.round(sw.power_w)} W now` : `target ${Math.round(d.setpoint_rh_pct)}%`}</span>
+        <span><HIcon name="clock" size={14} /> {runFor ? `on ${runFor}` : "dehumidifier"}</span>
+      </div>
+      <Tri name={d.name || "Dehumidifier"} state={state} busy={busy} keyBase={kb} onLabel="On 2 h"
+        onPick={(s) => act(`${kb}:${s}`, () => api.dehumOverride(s))} />
+    </div>
+  );
+}
+
 export const CIRC_MODES = [["off", "Off"], ["shadow", "Learning"], ["auto", "Automatic"]] as const;

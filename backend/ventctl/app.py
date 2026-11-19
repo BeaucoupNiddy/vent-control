@@ -282,7 +282,8 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
         old = c.config
         hw_keys = ("sensors", "switches", "homeassistant")
         hw_changed = any(getattr(old, k).model_dump(exclude={"mappings"}) != getattr(new, k).model_dump(exclude={"mappings"})
-                         for k in hw_keys)
+                         for k in hw_keys) or \
+            (old.dehumidifier.enabled, old.dehumidifier.switch_id) != (new.dehumidifier.enabled, new.dehumidifier.switch_id)
         c.apply_config(new)
         if hw_changed:
             sensors, switches, world = factory.build(new, c.clock, state.get("world"), c.clock.now())
@@ -362,6 +363,21 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             raise HTTPException(400, "minutes must be between 1 and 1440")
         c.set_fan_override(fid, req.state, req.minutes)
         await c.tick()  # act now instead of at the next decision
+        return c.status()
+
+    @app.post("/api/dehumidifier/override")
+    async def dehumidifier_override(req: FanOverride):
+        """Switch the dehumidifier by hand: on for a while, held off, or back to Auto."""
+        c = ctrl()
+        dh = c.config.dehumidifier
+        if not (dh.enabled and dh.switch_id):
+            raise HTTPException(400, "Assign the dehumidifier's smart plug in Settings first")
+        if req.state not in ("auto", "on", "off"):
+            raise HTTPException(400, "state must be auto, on or off")
+        if req.minutes is not None and not (1 <= req.minutes <= 24 * 60):
+            raise HTTPException(400, "minutes must be between 1 and 1440")
+        c.set_dehumidifier_override(req.state, req.minutes)
+        await c.tick()
         return c.status()
 
     @app.post("/api/alerts/dismiss")
@@ -724,7 +740,8 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
                 ctx["discover_error"] = str(e) or type(e).__name__
         if probe and c.config.switches.provider != "mock":
             ids = {f.switch_id for f in c.config.fans if f.switch_id} | \
-                  {x.switch_id for x in c.config.circulators if x.switch_id}
+                  {x.switch_id for x in c.config.circulators if x.switch_id} | \
+                  ({c.config.dehumidifier.switch_id} if c.config.dehumidifier.switch_id else set())
             probes = {}
             for sid in sorted(ids):
                 try:

@@ -4,6 +4,7 @@ import { Card } from "../components";
 import { ZoneSettings } from "./SettingsZones";
 import { RestartCard, UpdateCard } from "./SettingsUpdate";
 import { DataResetCard } from "./SettingsData";
+import { DehumPlug } from "./SettingsDehum";
 
 function get(o: Json, path: string) {
   return path.split(".").reduce((a, k) => (a == null ? a : a[k]), o);
@@ -178,12 +179,22 @@ const SECTIONS: { title: string; note?: string; fields: F[] }[] = [
     { path: "sensors.poll_seconds", label: "Polling interval (s)" },
     { path: "sensors.stale_minutes", label: "Stale after (min)" },
   ] },
-  { title: "Dehumidifier (monitoring only)", fields: [
+  { title: "Dehumidifier", note: "Plug the dehumidifier into a spare smart plug and pick that plug below. The app then works as its humidistat: it turns the plug on when the dehumidifier's room is above the target plus the start margin, and off at the target. Set the dehumidifier itself to run whenever it has power (its own humidistat at the lowest setting, or Continuous) and check that it starts again by itself after the plug turns it off and on. Automatic switching waits until you tick Commissioned; Auto/On/Off by hand on Home works before that.", fields: [
     { path: "dehumidifier.enabled", label: "Dehumidifier present", type: "bool" },
-    { path: "dehumidifier.setpoint_rh_pct", label: "Setpoint RH (%)" },
+    { path: "dehumidifier.name", label: "Name", type: "text" },
+    { path: "dehumidifier.commissioned", label: "Commissioned (let Automatic switch it)", type: "bool",
+      hint: "Tick after checking: it restarts by itself when power returns, its own humidistat is at its lowest or Continuous, it drains (or you empty the bucket), and the plug is rated for it (most plugs handle 15 A; a dehumidifier draws 3–6 A)" },
+    { path: "dehumidifier.setpoint_rh_pct", label: "Target RH (%): stops here" },
+    { path: "dehumidifier.start_margin_pct", label: "Start when this much above the target (%)" },
+    { path: "dehumidifier.zone_only", label: "Use only its own room's sensor", type: "bool", hint: "Off: falls back to the basement average when that room's sensor has no reading" },
+    { path: "dehumidifier.min_on_minutes", label: "Minimum run (min)", hint: "Protects the compressor from short cycling" },
+    { path: "dehumidifier.min_off_minutes", label: "Minimum rest between runs (min)" },
+    { path: "dehumidifier.manual_on_minutes", label: "On by hand lasts (min)" },
+    { path: "dehumidifier.run_circulation", label: "Run circulation fans while it runs", type: "bool", hint: "Spreads its dry air through the basement. Only commissioned fans with Circulation automation on Automatic switch; safety and concrete checks still apply" },
+    { path: "dehumidifier.hold_exhaust_when_outdoor_wetter", label: "Keep exhaust fans off while it runs if outdoor air is wetter", type: "bool", hint: "Stops a schedule from pulling damp outdoor air in on top of it. Automatic already does this. A manual fan run is left alone" },
     { path: "dehumidifier.rated_w", label: "Rated power (W)" },
     { path: "dehumidifier.removal_pints_per_day", label: "Estimated removal (pints/day)" },
-    { path: "dehumidifier.monitor_switch_id", label: "Power-metering plug id", type: "text", hint: "Read only; the app never switches the dehumidifier" },
+    { path: "dehumidifier.monitor_switch_id", label: "Power-metering plug id (optional)", type: "text", hint: "Read only. Leave blank with a Tapo P125M (no power meter); the app then treats plug on as running" },
     { path: "dehumidifier.running_threshold_w", label: "Running above (W)" },
     { path: "dehumidifier.require_ventilation_beats_dehumidifier", label: "Energy Saver: fans only when cheaper than dehumidifier", type: "bool" },
   ] },
@@ -267,6 +278,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
       {SECTIONS.map((s) => (
         <Card key={s.title} title={s.title}>
           {s.note && <p className="note">{s.note}</p>}
+          {s.title === "Dehumidifier" && <DehumPlug cfg={cfg} change={change} />}
           <div className="form">{s.fields.map((f) => <Field key={f.path} f={f} cfg={cfg} onChange={change} />)}</div>
           {s.title === "Fan control" && (
             <div className="table-wrap" style={{ marginTop: 16 }}>

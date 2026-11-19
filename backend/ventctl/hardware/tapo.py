@@ -103,8 +103,10 @@ async def discover_plugs(username: str = "", password: str = "", timeout: float 
 
 class TapoSwitches(SwitchController):
     def __init__(self, devices: list[TapoDevice], clock: Clock, username: str, password: str,
-                 timeout: float = 5.0, auto_off_minutes: float | None = None, connector=None):
+                 timeout: float = 5.0, auto_off_minutes: float | None = None, connector=None,
+                 no_auto_off: set[str] | None = None):
         self.devices = {d.switch_id: d for d in devices}
+        self.no_auto_off = set(no_auto_off or ())  # e.g. a dehumidifier: a re-arm would cut its compressor
         self.clock = clock
         self.username, self.password = username, password
         self.timeout = timeout
@@ -117,7 +119,8 @@ class TapoSwitches(SwitchController):
 
     def supports_hardware_auto_off(self) -> bool:
         # unknown until each plug has been contacted; any plug without a working timer makes it False
-        return self.auto_off_min is not None and all(v == "active" for v in self.watchdog.values())
+        return self.auto_off_min is not None and all(v == "active" for k, v in self.watchdog.items()
+                                                     if k not in self.no_auto_off)
 
     async def _connect(self, host: str):
         if Discover is None:
@@ -166,9 +169,18 @@ class TapoSwitches(SwitchController):
             self.firmware_updates[switch_id] = f"could not turn off auto-update: {e}"
 
     async def _setup_watchdog(self, switch_id: str, dev) -> None:
+        mod = dev.modules.get(Module.AutoOff) if Module else None
+        if mod is not None and switch_id in self.no_auto_off:
+            try:
+                if mod.enabled:
+                    await mod.set_enabled(False)
+                    await dev.update()
+                self.watchdog[switch_id] = "off (dehumidifier)"
+            except KasaException as e:
+                self.watchdog[switch_id] = f"could not turn off auto-off: {e}"
+            return
         if not self.auto_off_min:
             return
-        mod = dev.modules.get(Module.AutoOff) if Module else None
         if mod is None:
             self.watchdog[switch_id] = "unsupported"
             return

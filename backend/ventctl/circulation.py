@@ -504,6 +504,21 @@ def decide_circulator(
                        f"ON: finishing a short run after the dehumidifier stopped (until "
                        f"{state.dehum_post_until.strftime('%H:%M')}).", "uncertain", preds=preds)
 
+    # 5c. run with the dehumidifier: spread its dry air through the basement while it runs
+    dh = config.dehumidifier
+    if dh.enabled and dh.run_circulation:
+        if dehumidifier_running:
+            state.dehum_post_until = now + timedelta(minutes=cs.dehumidifier_post_run_min)
+            reasons.append("RUN_WITH_DEHUMIDIFIER")
+            return out(True, "RUN_WITH_DEHUMIDIFIER",
+                       f"ON: the {dh.name.lower()} is running, so this fan spreads its dry air through the basement "
+                       "and brings damp air from corners to it.", "beneficial", preds=preds)
+        if (state.dehum_post_until and now < state.dehum_post_until
+                and state.last_reason in ("RUN_WITH_DEHUMIDIFIER", "POST_DEHUMIDIFIER_RUN")):
+            return out(True, "POST_DEHUMIDIFIER_RUN",
+                       f"ON: finishing a short run after the {dh.name.lower()} stopped (until "
+                       f"{state.dehum_post_until.strftime('%H:%M')}).", "uncertain", preds=preds)
+
     # 6. exterior-ventilation support
     ext_on = bool(exterior.get("on"))
     if cs.run_with_exhaust:
@@ -627,6 +642,7 @@ MODES = {
 }
 _MODE_OF_REASON = {
     "DEHUMIDIFIER_SUPPORT": "DEHUMIDIFIER_SUPPORT", "POST_DEHUMIDIFIER_RUN": "DEHUMIDIFIER_SUPPORT",
+    "RUN_WITH_DEHUMIDIFIER": "DEHUMIDIFIER_SUPPORT",
     "RUN_WITH_EXHAUST": "VENTILATION_ASSIST", "POST_EXHAUST_RUN": "VENTILATION_ASSIST",
     "VENTILATION_SUPPORT": "VENTILATION_ASSIST", "POST_VENTILATION_SUPPORT": "VENTILATION_ASSIST",
     "LOCAL_HUMIDITY_HIGH": "ENHANCED_MIXING", "BENEFICIAL_ZONE_MIXING": "ENHANCED_MIXING",
@@ -680,10 +696,11 @@ def overview(config: AppConfig, zones: dict, surfaces: list, decisions: dict, ex
                   "elevated" if (srh or 0) >= ss.surface_rh_elevated_pct or concrete["risk"] == "elevated" else "low")
 
     dh = config.dehumidifier
-    dehum = {"level": 0 if not dh.enabled else (2 if dh.monitor_switch_id else 1),
+    dehum = {"level": 0 if not dh.enabled else (2 if (dh.monitor_switch_id or dh.switch_id) else 1),
              "running": dehumidifier_running if dh.enabled else None}
     dehum["label"] = ("Not set up" if not dh.enabled else
-                      "Runs on its own; the app does not know when it is running" if dh.monitor_switch_id == "" else
+                      "Runs on its own; the app does not know when it is running"
+                      if not (dh.monitor_switch_id or dh.switch_id) else
                       "Running" if dehumidifier_running else "Off" if dehumidifier_running is False else
                       "Monitoring plug not responding")
 

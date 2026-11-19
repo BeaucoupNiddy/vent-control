@@ -334,6 +334,25 @@ The Simulation page compares eight circulation strategies with the same exterior
 
 ---
 
+## Dehumidifier on a smart plug
+
+Plug the dehumidifier into a spare smart plug (a Tapo P125M works) and pick that plug in Settings → Dehumidifier,
+along with the room it sits in. The app then acts as its humidistat (`backend/ventctl/dehumidifier.py`):
+
+* **Auto** turns the plug on when that room's RH reaches the target plus the start margin (default 50% + 3%) and off
+  at the target. It falls back to the basement average if that room's sensor has no reading (unless "use only its own
+  room" is ticked). A 30 min minimum run and 15 min minimum rest protect the compressor.
+* Automatic switching waits until **Commissioned** is ticked. Before that, Home shows what Auto would do, and
+  **On** (2 h) / **Off** by hand still work.
+* Set the dehumidifier itself to run whenever it has power (its own humidistat at the lowest setting, or Continuous)
+  and check that it restarts on its own after a power cut.
+* While it runs, the circulation fans run too (to spread its dry air; same commissioning and safety checks as other
+  circulation runs), and the exhaust fans are kept off whenever outdoor air holds more moisture than the basement.
+* The plug's own Tapo auto-off timer is turned off for this plug: re-arming it briefly cuts power, which would
+  short-cycle the compressor. The safe startup (fans off after a restart) also leaves the dehumidifier alone.
+* With no power meter on the plug, "running" means the plug is on. A full bucket stops the dehumidifier without
+  the app knowing; a continuous drain hose avoids that.
+
 ## Ask: plain-language explainer (optional)
 
 The **Ask** tab lets you chat with an AI model through [OpenRouter](https://openrouter.ai) about why the fans are on or off. Paste an OpenRouter API key, pick a model from the list (fetched live from OpenRouter, with prices) and ask a question. Each question sends the model the current status (readings, every group's decision, reason codes and checks), the last 6 hours of trend, the 30 most recent events, your settings with passwords and tokens removed, and a plain-language summary of the rules (`backend/ventctl/explainer.py`). "See exactly what the model is sent" opens that text.

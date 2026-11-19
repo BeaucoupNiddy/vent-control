@@ -81,6 +81,7 @@ export const api = {
   chatModels: () => req("GET", "/api/chat/models"),
   chat: (messages: { role: string; content: string }[], model?: string, snapshot_id?: string) =>
     req("POST", "/api/chat", { messages, model, snapshot_id }),
+  dehumOverride: (state: string, minutes?: number) => req("POST", "/api/dehumidifier/override", { state, minutes }),
   fanOverride: (id: string, state: string, minutes?: number) =>
     req("POST", `/api/fans/${encodeURIComponent(id)}/override`, { state, minutes }),
   dismissAlerts:(ids?: string[]) => req("POST", "/api/alerts/dismiss", { ids }),

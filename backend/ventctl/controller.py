@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 
 from .clock import Clock
 from . import calibration, circulation, tamo, thermal
+from . import dehumidifier as dehum_mod
 from . import surfaces as surf_mod
 from . import zones as zones_mod
 from .config import AppConfig, ControlPolicy, FanGroup, Mode, SensorMapping, SensorRole
@@ -54,6 +55,7 @@ from .units import delta_f_to_c
 log = logging.getLogger("ventctl")
 COMMAND_LOCKOUT_MIN = 30
 RUN_STATE_KEY = "auto_run_state"
+DEHUM_OVERRIDE_KEY = "dehumidifier_override"
 RESUME_WITHIN = timedelta(minutes=5)  # an app update restarts in under a minute
 THERMAL_REFIT_H = 6
 THERMAL_CHECK_MIN = 30
@@ -135,6 +137,9 @@ class Controller:
     _cycle_times: list[datetime] = field(default_factory=list)
     _command_failures: dict[str, tuple] = field(default_factory=dict)
     dehum_status: SwitchStatus | None = None
+    dehum_state: dehum_mod.DehumState = field(default_factory=dehum_mod.DehumState)
+    dehum_override: dict | None = None  # {"state": "on" | "off", "until": iso | None}
+    dehum_decision: dehum_mod.DehumDecision | None = None
     forecast: ForecastCache | None = None
     shadow_groups: dict[str, GroupState] = field(default_factory=dict)
     shadow_decisions: dict[str, Decision] = field(default_factory=dict)
@@ -171,6 +176,7 @@ class Controller:
         now = self.clock.now()
         self.dismissed_alerts = dict(self.storage.get_kv("dismissed_alerts") or {})
         self.fan_overrides = dict(self.storage.get_kv("fan_overrides") or {})
+        self.dehum_override = self.storage.get_kv(DEHUM_OVERRIDE_KEY) or None
         found = {}
         turned_off = False
         resume = self._resumable_groups(now)
@@ -270,7 +276,7 @@ class Controller:
         self.snapshot = snap
 
         # verify switch states every tick
-        for sid in self._switch_ids():
+        for sid in self._switch_ids() + self._dehum_switch_ids():
             self._record_status(await self.switches.get(sid), now)
 
         if self.forecast is not None:
@@ -298,6 +304,7 @@ class Controller:
             was_on = gs.is_on
             d = decide(cond, gs, dcfg, g, now, local_hour=local_hour, thermal_params=tp)
             d = self._maybe_start_now(g, gs, cond, dcfg, d, now, local_hour, tp)
+            d = self._hold_exhaust_for_dehumidifier(cond, d)
             _track_deferral(gs, d, now)
             prev = self.decisions.get(g.id)
             self.decisions[g.id] = d
@@ -320,6 +327,7 @@ class Controller:
         if allc.indoor:
             self._indoor_hist.append((now, allc.indoor))
         self._zones_and_surfaces(snap, allc, fc, now)
+        await self._dehumidify(now)
         await self._circulate(now, local_hour)
         self._maybe_refit(now)
 
@@ -934,6 +942,10 @@ class Controller:
             info = self.switch_info.get(f.switch_id)
             if f.enabled and info and info.reachable and info.confirmed and info.commanded:
                 await rearm(f.switch_id, now)
+        for sid in self._dehum_switch_ids():
+            info = self.switch_info.get(sid)
+            if info and info.reachable and info.confirmed and info.commanded:
+                await rearm(sid, now)
 
     async def _read_dehumidifier(self) -> None:
         dh = self.config.dehumidifier
@@ -943,10 +955,133 @@ class Controller:
             self.dehum_status = None
 
     def dehumidifier_running(self) -> bool | None:
+        """Running, from a power-metering plug when there is one, else from the plug the app switches
+        (on = has power; a full bucket can still stop it)."""
+        dh = self.config.dehumidifier
         st = self.dehum_status
-        if st is None or not st.reachable or st.power_w is None:
-            return None
-        return st.power_w >= self.config.dehumidifier.running_threshold_w
+        if st is not None and st.reachable and st.power_w is not None:
+            return st.power_w >= dh.running_threshold_w
+        if dh.enabled and dh.switch_id:
+            info = self.switch_info.get(dh.switch_id)
+            if info is None or not info.reachable or info.confirmed is None:
+                return None
+            if info.power_w is not None:
+                return info.power_w >= dh.running_threshold_w
+            return bool(info.confirmed)
+        return None
+
+    def _dehum_switch_ids(self) -> list[str]:
+        """The plug the app switches for the dehumidifier. Kept out of the safe startup (which turns fans
+        off): cutting a running compressor at every app restart would do more harm than good."""
+        dh = self.config.dehumidifier
+        return [dh.switch_id] if dh.enabled and dh.switch_id and dh.switch_id not in self._switch_ids() else []
+
+    def set_dehumidifier_override(self, state: str, minutes: float | None = None, who: str = "user") -> None:
+        """state: "auto" lets the app decide, "on" runs it for `minutes`, "off" holds it off."""
+        now = self.clock.now()
+        dh = self.config.dehumidifier
+        if state == "auto":
+            self.dehum_override = None
+            self._dehum_release = True  # an ON by hand ends: switch it off unless Auto may run it
+            msg = f"{dh.name}: back to Auto"
+        elif state == "on":
+            dur = minutes or dh.manual_on_minutes
+            self.dehum_override = {"state": "on", "until": (now + timedelta(minutes=dur)).isoformat()}
+            msg = f"{dh.name}: ON by hand for {dur:.0f} min"
+        else:
+            self.dehum_override = {"state": "off", "until": None}
+            msg = f"{dh.name}: held OFF until set back to Auto"
+        self.storage.set_kv(DEHUM_OVERRIDE_KEY, self.dehum_override)
+        self.storage.add_event(now, "override", "info", msg, "DEHUM_OVERRIDE", {"by": who, "state": state})
+
+    async def _dehumidify(self, now: datetime) -> None:
+        dh = self.config.dehumidifier
+        st = self.dehum_state
+        sim = self.config.mode == Mode.SIMULATION
+        expired = False
+        o = self.dehum_override
+        if o and o.get("until") and now >= datetime.fromisoformat(o["until"]):
+            self.dehum_override = None
+            self.storage.set_kv(DEHUM_OVERRIDE_KEY, None)
+            self.storage.add_event(now, "override", "info", f"{dh.name}: run by hand ended; back to Auto",
+                                   "DEHUM_OVERRIDE_EXPIRED")
+            expired = True
+        if getattr(self, "_dehum_release", False):
+            self._dehum_release = False
+            expired = True
+        sid = dh.switch_id if dh.enabled else ""
+        if sid and not sim:
+            info = self.switch_info.get(sid)
+            actual = bool(info and info.confirmed)
+            verified = bool(info and info.reachable and info.confirmed is not None)
+            fail = self._command_failures.get(sid)
+            if fail and now < fail[1]:
+                verified = False
+            if actual != st.is_on:
+                st.last_change = now
+            st.is_on, st.verified = actual, verified
+        elif sim:
+            st.verified = True
+        d = dehum_mod.decide(self.config, st, self.dehum_override, self.zone_status, self.basement_avg, now)
+        prev = self.dehum_decision
+        self.dehum_decision = d
+        if not d.commanding and d.reason_code not in ("PLUG_UNVERIFIED", "NOT_SET_UP"):
+            # not commissioned: track what Auto would do; switch off only what the app itself turned on
+            if d.target_on != st.shadow_on:
+                st.shadow_on, st.shadow_change = d.target_on, now
+            if expired and st.is_on and sid and not sim:
+                await self._command_dehum(sid, False, "DEHUM_OVERRIDE_EXPIRED", now)
+        elif d.commanding and sid:
+            st.shadow_on, st.shadow_change = st.is_on, st.last_change
+            if sim:
+                if d.target_on != st.is_on:
+                    st.is_on, st.last_change = d.target_on, now
+            elif d.target_on != st.is_on:
+                await self._command_dehum(sid, d.target_on, "DEHUM:" + d.reason_code, now)
+        if prev is None or prev.reason_code != d.reason_code or prev.target_on != d.target_on:
+            self.storage.add_event(now, "dehumidifier", "info", f"{dh.name}: {d.explanation}", "DEHUM:" + d.reason_code,
+                                   {"target_on": d.target_on, "commanding": d.commanding,
+                                    "control_rh_pct": d.control_rh_pct, "source": d.control_source})
+
+    async def _command_dehum(self, sid: str, on: bool, reason: str, now: datetime) -> None:
+        name = self.config.dehumidifier.name
+        failed = self._command_failures.get(sid)
+        if failed and failed[2] == on and now < failed[1]:
+            return  # locked out after a failed command: no rapid retries
+        res = await self.switches.set(sid, on)
+        self._record_status(res, now, commanded=on)
+        details = {"switch": sid, "command": "on" if on else "off", "confirmed_state": res.on,
+                   "reachable": res.reachable, "error": res.error, "reason_code": reason}
+        if res.reachable and res.on == on:
+            self._command_failures.pop(sid, None)
+            self.storage.add_event(now, "command", "info", f"{name} switched {'ON' if on else 'OFF'}", reason, details)
+            if on != self.dehum_state.is_on:
+                self.dehum_state.last_change = now
+            self.dehum_state.is_on = on
+        else:
+            msg = res.error or f"plug reports {'ON' if res.on else 'OFF'} after command"
+            self.storage.add_event(now, "fault", "critical",
+                                   f"Command failure: {name} did not confirm {'ON' if on else 'OFF'} ({msg}). "
+                                   f"Retrying in {COMMAND_LOCKOUT_MIN} minutes.", "COMMAND_FAILURE", details)
+            self._command_failures[sid] = (msg, now + timedelta(minutes=COMMAND_LOCKOUT_MIN), on)
+            self.dehum_state.verified = False
+
+    def _hold_exhaust_for_dehumidifier(self, cond, d: Decision) -> Decision:
+        """While the dehumidifier runs, don't let the exhaust fans pull in outdoor air that holds more
+        moisture than the basement (it would undo the dehumidifier's work). Manual runs are left alone."""
+        dh = self.config.dehumidifier
+        if not (d.target_on and dh.enabled and dh.hold_exhaust_when_outdoor_wetter
+                and self.config.mode in (Mode.AUTO, Mode.SCHEDULE) and self.dehumidifier_running()):
+            return d
+        if cond.indoor is None or cond.outdoor is None or cond.outdoor.w < cond.indoor.w:
+            return d
+        d.target_on = False
+        d.held = False
+        d.reason_code = "DEHUMIDIFIER_OUTDOOR_WETTER"
+        d.reasons = ["DEHUMIDIFIER_OUTDOOR_WETTER"] + [r for r in d.reasons if r != d.reason_code]
+        d.explanation = (f"Fans OFF: the {dh.name.lower()} is running and outdoor air holds more moisture than the "
+                         "basement, so the fans would pull damp air in.")
+        return d
 
     # ------------------------------------------------------------ helpers
     def _switch_ids(self) -> list[str]:
@@ -1130,7 +1265,7 @@ class Controller:
 
     def _forget_removed_hardware(self, now: datetime) -> None:
         """Drop state and clear alerts for plugs and sensors that are no longer configured."""
-        plugs = set(self._switch_ids())
+        plugs = set(self._switch_ids()) | set(self._dehum_switch_ids())
         if self.config.dehumidifier.monitor_switch_id:
             plugs.add(self.config.dehumidifier.monitor_switch_id)
         sensors = {m.sensor_id for m in self.config.sensors.mappings if m.enabled}
@@ -1458,7 +1593,7 @@ class Controller:
             }
         plugs = {}
         ids = [f.switch_id for f in self.config.fans if f.switch_id] + \
-              [c.switch_id for c in self.config.circulators if c.switch_id]
+              [c.switch_id for c in self.config.circulators if c.switch_id] + self._dehum_switch_ids()
         for sid in dict.fromkeys(ids):
             info = self.switch_info.get(sid)
             on = None if info is None or info.confirmed is None else int(bool(info.confirmed))
@@ -1471,6 +1606,9 @@ class Controller:
         return {"sensors": sensors, "plugs": plugs}
 
     # ------------------------------------------------------------ status
+    def _dehum_control_status(self) -> dict:
+        return _dehum_control_status_impl(self)
+
     def _circ_status(self, now: datetime) -> list[dict]:
         return _circ_status_impl(self, now)
 
@@ -1544,8 +1682,22 @@ class Controller:
                 "reachable": self.dehum_status.reachable if self.dehum_status else None,
                 "running": self.dehumidifier_running(),
                 "monitored": bool(self.config.dehumidifier.monitor_switch_id),
+                **self._dehum_control_status(),
             },
         }
+
+
+def _dehum_control_status_impl(ctrl: "Controller") -> dict:
+    dh = ctrl.config.dehumidifier
+    info = ctrl.switch_info.get(dh.switch_id) if dh.switch_id else None
+    d = ctrl.dehum_decision
+    return {"switch_id": dh.switch_id or None, "controlled": bool(dh.switch_id),
+            "commissioned": dh.commissioned, "zone": dh.zone, "setpoint_rh_pct": dh.setpoint_rh_pct,
+            "start_rh_pct": dh.setpoint_rh_pct + dh.start_margin_pct, "override": ctrl.dehum_override,
+            "switch": info.to_dict() if info else None,
+            "running_s": (ctrl.clock.now() - info.on_since).total_seconds() if info and info.on_since else None,
+            "decision": d.to_dict() if d else None,
+            "run_circulation": dh.run_circulation, "hold_exhaust_when_outdoor_wetter": dh.hold_exhaust_when_outdoor_wetter}
 
 
 def _circ_status_impl(ctrl: "Controller", now: datetime) -> list[dict]:

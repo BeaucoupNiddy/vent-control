@@ -33,7 +33,8 @@ def build(cfg: AppConfig, clock: Clock, world: MockWorld | None, start: datetime
     if cfg.switches.provider == "tapo":
         switches: SwitchController = TapoSwitches(cfg.switches.tapo_devices, clock, cfg.switches.tapo_username,
                                                   cfg.switches.tapo_password, max(cfg.switches.timeout_s, 5),
-                                                  cfg.switches.hardware_max_on_minutes)
+                                                  cfg.switches.hardware_max_on_minutes,
+                                                  no_auto_off=_compressor_plugs(cfg))
     elif cfg.switches.provider == "shelly":
         switches = ShellySwitches(cfg.switches.shelly_devices, clock, cfg.switches.timeout_s,
                                                     cfg.switches.hardware_max_on_minutes)
@@ -42,6 +43,13 @@ def build(cfg: AppConfig, clock: Clock, world: MockWorld | None, start: datetime
     else:
         switches = MockSwitches(world, clock)  # type: ignore[arg-type]
     return sensors, switches, world
+
+
+def _compressor_plugs(cfg: AppConfig) -> set[str]:
+    """Plugs whose Tapo auto-off timer must stay off: re-arming it briefly cuts power, which would
+    short-cycle a dehumidifier's compressor."""
+    dh = cfg.dehumidifier
+    return {dh.switch_id} if dh.enabled and dh.switch_id else set()
 
 
 def data_source(cfg: AppConfig) -> str:
