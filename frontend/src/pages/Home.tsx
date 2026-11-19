@@ -7,7 +7,7 @@ import { api, Json } from "../api";
 import { exhaustState, plugOn } from "../fanstate";
 import { temp, tempVal, useUnit } from "../units";
 import { ComfortDonut, ClimateChart, DailyBars, DryingChart, Gauge, MiniBars, Ring, Seg, Sparkline } from "./home/charts";
-import { CIRC_MODES, CircFanCard, ExhaustFanCard, FanOrb, ModeControl, modeLabel } from "./home/controls";
+import { CIRC_MODES, CircFanCard, DehumCard, ExhaustFanCard, FanOrb, ModeControl, modeLabel } from "./home/controls";
 import { EquipmentList, WallMeter, devices } from "./home/equipment";
 import { HIcon } from "./home/icons";
 import {
@@ -330,6 +330,14 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
               {fans.map((f) => <ExhaustFanCard key={f.id} f={f} groupSafety={safety} status={status} busy={busy} act={act} />)}
             </div>
             <p className="h-hint">Auto follows the app. On runs that fan for an hour. Off keeps it off until you pick Auto.</p>
+          </Panel>
+        )}
+        {status.dehumidifier && status.dehumidifier.controlled && (
+          <Panel icon="dehum" title="Dehumidifier" sub={`On a smart plug · stops at ${Math.round(status.dehumidifier.setpoint_rh_pct)}%, starts at ${Math.round(status.dehumidifier.start_rh_pct)}%`}>
+            <div className="h-fancards">
+              <DehumCard d={status.dehumidifier} status={status} busy={busy} act={act} />
+            </div>
+            <p className="h-hint">{status.dehumidifier.decision?.explanation}{status.dehumidifier.run_circulation ? (circ.mode === "auto" ? " Circulation fans run alongside it to spread the dry air." : " Circulation fans will run alongside it once Circulation is on Automatic.") : ""}</p>
           </Panel>
         )}
         {circs.length > 0 && (

@@ -416,6 +416,25 @@ class Dehumidifier(BaseModel):
     removal_pints_per_day: float = Field(35, ge=0, description="Estimated real removal at basement conditions")
     monitor_switch_id: str = Field("", description="Power-metering plug feeding the dehumidifier (monitored, never switched)")
     zone: str | None = Field(None, description="Zone where the dehumidifier draws its air")
+    # switched control through a smart plug (the plug cuts and restores the dehumidifier's power)
+    switch_id: str = Field("", description="Smart plug that powers the dehumidifier and that the app switches. Set "
+                                           "the dehumidifier to run whenever it has power")
+    commissioned: bool = Field(False, description="Checked: the dehumidifier restarts on its own when the plug turns "
+                                                  "on, its own humidistat is at its lowest (or continuous), it drains "
+                                                  "or its bucket is emptied, and the plug is rated for it. Automatic "
+                                                  "switching waits for this; On/Off by hand works before")
+    start_margin_pct: float = Field(3, ge=1, le=15, description="Start when the room RH is this far above the target; "
+                                                                 "stop at the target")
+    zone_only: bool = Field(False, description="Use only its own room's sensor (no fallback to the basement average)")
+    min_on_minutes: float = Field(30, ge=5, le=480, description="Minimum run once started (compressor protection)")
+    min_off_minutes: float = Field(15, ge=5, le=240, description="Minimum rest before starting again (compressor "
+                                                                 "protection)")
+    manual_on_minutes: float = Field(120, ge=5, le=24 * 60, description="How long On by hand lasts")
+    run_circulation: bool = Field(True, description="Run the circulation fans while it runs, to spread its dry air "
+                                                    "through the basement (safety and concrete checks still apply)")
+    hold_exhaust_when_outdoor_wetter: bool = Field(True, description="While it runs, keep the exhaust fans off "
+                                                                     "whenever outdoor air holds more moisture than "
+                                                                     "the basement, so they don't pull damp air in")
     running_threshold_w: float = Field(60, ge=0, description="Above this power draw the compressor is considered running")
     require_ventilation_beats_dehumidifier: bool = Field(
         False, description="Energy Saver: run fans only when ventilation is cheaper per gallon than the dehumidifier")
@@ -516,6 +535,9 @@ class AppConfig(BaseModel):
         if len(cids) != len(set(cids)):
             raise ValueError("circulator ids must be unique")
         fan_switches = {f.switch_id for f in self.fans if f.switch_id}
+        dsw = self.dehumidifier.switch_id
+        if dsw and (dsw in fan_switches or any(c.switch_id == dsw for c in self.circulators)):
+            raise ValueError(f"the dehumidifier's smart plug {dsw} is already used by a fan")
         for c in self.circulators:
             if c.switch_id and c.switch_id in fan_switches:
                 raise ValueError(f"circulator {c.id} shares smart plug {c.switch_id} with an exterior fan")

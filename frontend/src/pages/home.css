@@ -443,3 +443,7 @@
   .h-rooms { grid-template-columns: minmax(0, 1fr); }
   .h-panel-head > .h-seg { width: 100%; }
 }
+
+/* dehumidifier card icon, sized like the fan orbs */
+.h-fancard .fc-dehum { width: 46px; height: 46px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; background: var(--h-idle-bg, rgba(127, 127, 127, 0.12)); color: inherit; }
+.h-fancard.on .fc-dehum { background: rgba(52, 168, 110, 0.18); color: #2e9a63; }

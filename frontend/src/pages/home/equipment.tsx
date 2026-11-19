@@ -40,6 +40,7 @@ export function devices(status: Json): Device[] {
   const owner: Record<string, string> = {};
   (status.groups || []).forEach((g: Json) => (g.fans || []).forEach((f: Json) => { if (f.switch_id) owner[f.switch_id] = f.name; }));
   ((status.circulation && status.circulation.circulators) || []).forEach((c: Json) => { if (c.switch_id) owner[c.switch_id] = c.name; });
+  if (status.dehumidifier && status.dehumidifier.switch_id) owner[status.dehumidifier.switch_id] = status.dehumidifier.name || "Dehumidifier";
   const sws = hw.switches || {};
   Object.keys(sws).forEach((id) => {
     const sw = sws[id];
@@ -56,8 +57,9 @@ export function devices(status: Json): Device[] {
   if (d) {
     out.push({
       id: "dehum", icon: "dehum", kind: "Dehumidifier", name: d.name || "Dehumidifier",
-      tone: d.reachable === false ? "bad" : "good", state: d.reachable === false ? "Not responding" : d.running ? "Running" : "Idle",
-      detail: d.monitored ? (d.power_w != null ? `${Math.round(d.power_w)} W` : "Monitored by plug") : "Not monitored",
+      tone: d.reachable === false || (d.switch && d.switch.reachable === false) ? "bad" : "good",
+      state: d.reachable === false || (d.switch && d.switch.reachable === false) ? "Not responding" : d.running ? "Running" : d.running === false ? "Idle" : "Unknown",
+      detail: d.controlled ? `Switched by plug ${d.switch_id}${d.commissioned ? "" : " · not commissioned"}` : d.monitored ? (d.power_w != null ? `${Math.round(d.power_w)} W` : "Monitored by plug") : "Not monitored",
     });
   }
   const fc = status.forecast;

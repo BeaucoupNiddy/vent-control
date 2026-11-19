@@ -139,7 +139,9 @@ class MockSwitches(SwitchController):
     def _power(self, sid: str) -> float:
         fans = [f for f in self.world.config.fans if f.switch_id == sid]
         circs = [c for c in self.world.config.circulators if c.switch_id == sid]
-        return (sum(f.rated_w for f in fans) + sum(c.rated_w for c in circs)) * (1 + self.world.rng.gauss(0, 0.02))
+        dh = self.world.config.dehumidifier
+        dw = dh.rated_w if dh.enabled and dh.switch_id == sid else 0.0
+        return (sum(f.rated_w for f in fans) + sum(c.rated_w for c in circs) + dw) * (1 + self.world.rng.gauss(0, 0.02))
 
     async def get(self, switch_id: str) -> SwitchStatus:
         if self.world.switch_faults.get(switch_id) == "unreachable":
