@@ -1,6 +1,7 @@
 /* Settings: zones, zone connections, circulation fans (Version 3). */
 import { Card } from "../components";
 import { Json } from "../api";
+import { CircPlugs, CircPlugSelect } from "./SettingsCircPlugs";
 
 type Change = (p: string, v: Json) => void;
 
@@ -31,11 +32,6 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
   const circs: Json[] = cfg.circulators || [];
   const mixFans: string[] = cfg.circulation?.mixing_fans || [];
   const zoneOpts = zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>);
-  const plugs: string[] = [
-    ...(cfg.switches.tapo_devices || []).map((d: Json) => d.switch_id),
-    ...(cfg.switches.shelly_devices || []).map((d: Json) => d.switch_id),
-    ...(cfg.switches.provider === "mock" ? ["mock-plug-1", "mock-plug-2", "mock-plug-3", "mock-plug-4"] : []),
-  ];
   return (
     <>
       <Card title="Zones">
@@ -101,6 +97,8 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
         <p className="note"><strong>Water safety:</strong> do not energize fans or plugs that are in or near standing water. Keep them above
           known flood levels, use GFCI-protected outlets, and remember a smart plug does not make a household fan suitable for wet locations.
           The water-intrusion lockout (Safety interlocks) turns every fan off, including manual overrides.</p>
+        <CircPlugs cfg={cfg} change={change} />
+        <h4 style={{ margin: "16px 0 8px" }}>All circulation fan settings</h4>
         <div className="table-wrap"><table>
           <thead><tr><th>Id</th><th>Name</th><th>Type</th><th>Job</th><th>Sits in zone</th><th>Location</th><th>Model</th><th>Smart plug</th><th>Speed set on fan</th><th>Watts</th>
             <th>Ventilation support</th><th>Timed cycling</th><th>Automatic allowed</th><th>Commissioned</th><th>Enabled</th><th /></tr></thead>
@@ -116,7 +114,7 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
                 <option value="">—</option>{zoneOpts}</select></td>
               <td><input value={c.location} style={{ width: 130 }} onChange={(e) => change(`circulators.${i}.location`, e.target.value)} /></td>
               <td><input value={c.model} style={{ width: 130 }} onChange={(e) => change(`circulators.${i}.model`, e.target.value)} /></td>
-              <td><input value={c.switch_id} list="plug-ids" style={{ width: 110 }} onChange={(e) => change(`circulators.${i}.switch_id`, e.target.value)} /></td>
+              <td><CircPlugSelect cfg={cfg} i={i} change={change} /></td>
               <td><select value={c.physical_speed} onChange={(e) => change(`circulators.${i}.physical_speed`, e.target.value)}>
                 {["low", "medium", "high", "unknown"].map((s) => <option key={s}>{s}</option>)}</select></td>
               <td><input type="number" style={{ width: 60 }} value={c.rated_w} onChange={(e) => change(`circulators.${i}.rated_w`, num(e.target.value))} /></td>
@@ -135,7 +133,6 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
             </tr>
           ))}</tbody>
         </table></div>
-        <datalist id="plug-ids">{plugs.map((p) => <option key={p} value={p} />)}</datalist>
         <div className="row" style={{ marginTop: 8 }}>
           <button className="btn" onClick={() => change("circulators", [...circs, newCirc(circs, "fan")])}>Add circulation fan</button>
           <button className="btn" onClick={() => change("circulators", [...circs, newCirc(circs, "blower")])}>Add blower</button>
@@ -145,7 +142,7 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
           with a working concrete probe nearby and the surface comfortably above its dew point. <em>Stir one room</em> needs "Sits in zone" and
           runs with the exhaust fans or on the mixing schedule. <em>Help the dehumidifier</em> runs only when the app can see the dehumidifier
           running (a power-metering plug); with the Tapo P125M plugs it cannot, so it falls back to humidity readings.</p>
-        <p className="faint">Each circulation fan needs its own plug, separate from the exterior fans. Add the plug under Hardware first.</p>
+        <p className="faint">Each circulation fan needs its own plug, separate from the exterior fans. Pick or add it under "Which plug powers each fan" above.</p>
         <label className="row" style={{ marginTop: 8 }}>Dehumidifier draws its air from
           <select value={cfg.dehumidifier?.zone ?? ""} onChange={(e) => change("dehumidifier.zone", e.target.value || null)}>
             <option value="">—</option>{zoneOpts}</select>
