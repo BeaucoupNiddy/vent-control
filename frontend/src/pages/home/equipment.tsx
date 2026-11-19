@@ -114,7 +114,7 @@ export function WallMeter({ s, u }: { s: Json; u: TempUnit }) {
       <div className="h-wall-track" aria-hidden>
         <span className="wt-gap" style={{ left: pos(a), width: `${(((b - a) / (hi - lo)) * 100).toFixed(1)}%` }} />
         <span className="wt-mark dew" style={{ left: pos(dewC) }}><HIcon name="drop" size={14} /><em>Dew point {temp(dewC, u, 0)}</em></span>
-        <span className="wt-mark wall" style={{ left: pos(wallC) }}><HIcon name="wall" size={14} /><em>Wall {temp(wallC, u, 0)}</em></span>
+        <span className="wt-mark wall" style={{ left: pos(wallC) }}><HIcon name="wall" size={14} /><em>{/slab|concrete|floor/i.test(s.name || "") ? "Slab" : "Wall"} {temp(wallC, u, 0)}</em></span>
       </div>
     );
   }

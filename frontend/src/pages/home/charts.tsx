@@ -127,7 +127,11 @@ export function ClimateChart({ pts, u, t, range, setRange, loading, nowX }: {
     in_rh: p.in_rh, avg_rh: p.avg_rh, out_rh: p.out_rh,
     in_td: tempVal(p.in_td, u), avg_td: tempVal(p.avg_td, u), out_td: tempVal(p.out_td, u),
     in_t: tempVal(p.in_t, u), avg_t: tempVal(p.avg_t, u), out_t: tempVal(p.out_t, u),
+    slab_t: tempVal(p.slab_t, u), slab_td: tempVal(p.slab_t, u),
   }));
+  // The concrete probe is its own line, never part of the basement average. On the dew point chart it is the
+  // condensation line: water can form on the slab when the air's dew point reaches it.
+  const hasSlab = metric !== "rh" && rows.some((r) => r.slab_t != null);
   const showAvg = rows.some((r) => r.avg_rh != null && r.in_rh != null && Math.abs(r.avg_rh - r.in_rh) > 0.5);
   const days = rows.length > 1 ? (rows[rows.length - 1].x - rows[0].x) / 864e5 : 1;
   const xf = (x: number) => new Date(x).toLocaleString(undefined, days > 1.5 ? { weekday: "short", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
@@ -136,6 +140,7 @@ export function ClimateChart({ pts, u, t, range, setRange, loading, nowX }: {
     { key: key("in"), name: showAvg ? "Most humid area" : "Basement", color: "var(--series-1)" },
     ...(showAvg ? [{ key: key("avg"), name: "Whole basement", color: "var(--series-3)", dashed: true }] : []),
     { key: key("out"), name: "Outside", color: "var(--series-2)" },
+    ...(hasSlab ? [{ key: key("slab"), name: metric === "td" ? "Concrete slab (condenses below)" : "Concrete slab", color: "var(--series-4)" }] : []),
   ];
   const mainKey = showAvg ? key("avg") : key("in");
   const st = stats(rows.map((r) => (r as Json)[mainKey]));

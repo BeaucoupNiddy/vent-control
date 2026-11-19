@@ -97,6 +97,7 @@ export type Pt = {
   in_rh: number | null; avg_rh: number | null; out_rh: number | null;
   in_td: number | null; avg_td: number | null; out_td: number | null;
   in_t: number | null; avg_t: number | null; out_t: number | null;
+  slab_t: number | null;  // measured concrete / surface probe (coldest), never part of the room average
   gapF: number | null;    // basement dew point minus outside dew point, °F (positive = outside drier)
   removal: number;        // g/h actually removed (0 while fans are off)
   zones: Record<string, number | null>; // zone RH %
@@ -121,6 +122,7 @@ export function toPts(rows: Json[]): Pt[] {
       in_rh: r.indoor_rh, avg_rh: r.avg_rh ?? null, out_rh: r.outdoor_rh,
       in_td: r.indoor_td_c, avg_td: r.avg_td_c ?? null, out_td: r.outdoor_td_c,
       in_t: r.indoor_t_c, avg_t: r.avg_t_c ?? null, out_t: r.outdoor_t_c,
+      slab_t: r.surface_source === "measured" && r.surface_t_c != null ? r.surface_t_c : null,
       gapF: td != null && r.outdoor_td_c != null ? ((td - r.outdoor_td_c) * 9) / 5 : null,
       removal: r.fans_on > 0 && r.removal_g_h != null ? r.removal_g_h : 0,
       zones,
@@ -142,7 +144,7 @@ export function withLive(pts: Pt[], liveOn: boolean, nowMs: number, onSinceMs: n
   if (!(nowMs > last.x)) return pts;
   const blank = (x: number, on: boolean): Pt => ({
     x, on, rh: null, in_rh: null, avg_rh: null, out_rh: null, in_td: null, avg_td: null, out_td: null,
-    in_t: null, avg_t: null, out_t: null, gapF: null, removal: 0, zones: {},
+    in_t: null, avg_t: null, out_t: null, slab_t: null, gapF: null, removal: 0, zones: {},
   });
   const out = pts.slice();
   if (last.on && !liveOn) out.push(blank(last.x + 1, false));
