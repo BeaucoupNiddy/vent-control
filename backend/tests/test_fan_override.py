@@ -98,3 +98,16 @@ def test_circulation_runs_with_exhaust_in_automatic(tmp_path):
     st2 = circulation.CircState(verified=True)
     d4 = circulation.decide_circulator(c, cfg, {}, [], st2, now, {"on": True, "drying": True, "auto_on": True}, None, 12)
     assert d4.reason_code != "RUN_WITH_EXHAUST"
+
+
+def test_buttons_switch_plugs_right_away(tmp_path):
+    """Off / Boost / circulation-fan buttons act at once, not at the next one-minute decision."""
+    with client(tmp_path) as c:
+        c.post("/api/mode", json={"mode": "manual_on", "minutes": 10, "maintenance": True})
+        assert plugs(c).get("mock-plug-1") is True  # no tick in between: the button itself switched it
+        c.post("/api/mode", json={"mode": "off"})
+        assert not plugs(c).get("mock-plug-1")
+        c.post("/api/circulators/circ-1/manual", json={"state": "on", "minutes": 15})
+        assert plugs(c).get("mock-plug-2") is True
+        c.post("/api/circulators/circ-1/manual", json={"state": "off", "minutes": 15})
+        assert not plugs(c).get("mock-plug-2")
