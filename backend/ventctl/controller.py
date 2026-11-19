@@ -454,7 +454,7 @@ class Controller:
         ov = circulation.overview(cfg, self.zone_status, self.surface_status,
                                   {c.id: self.circ_decisions[c.id] for c in cfg.circulators
                                    if c.id in self.circ_decisions},
-                                  exterior, self.dehumidifier_running(), self._outdoor_air)
+                                  exterior, self.dehumidifier_running(), self._outdoor_air, now, local_hour)
         prev_mode = (self.circ_overview or {}).get("mode")
         ov["since"] = (self.circ_overview or {}).get("since") if prev_mode == ov["mode"] else now.isoformat()
         ov["evaluated_at"] = now.isoformat()

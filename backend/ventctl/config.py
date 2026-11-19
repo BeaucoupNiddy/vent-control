@@ -179,11 +179,18 @@ class CirculationSettings(BaseModel):
     post_ventilation_min: float = Field(15, ge=0, le=240, description="Keep supporting fans on after exterior "
                                                                       "ventilation stops")
     condensation_aware: bool = True
-    periodic_mixing: bool = False
-    mixing_on_min: float = Field(15, ge=1, le=240)
-    mixing_off_min: float = Field(45, ge=1, le=1440)
+    periodic_mixing: bool = Field(False, description="Timed cycling: run circulation fans on a repeating on/off "
+                                                     "timer, even when no zone difference calls for it")
+    mixing_on_min: float = Field(15, ge=1, le=240, description="Timed cycling: minutes on")
+    mixing_off_min: float = Field(45, ge=1, le=1440, description="Timed cycling: minutes off between runs")
     mixing_windows: list[ScheduleWindow] = Field(default_factory=list, description="Empty = any time")
     mixing_fans: list[str] = Field(default_factory=list, description="Empty = all circulators")
+    mixing_quiet_start_hour: float | None = Field(None, ge=0, le=24, description="Timed cycling pauses from this "
+                                                  "local hour (e.g. 22 = 10 PM). Blank = no quiet hours")
+    mixing_quiet_end_hour: float | None = Field(None, ge=0, le=24, description="Timed cycling resumes at this local "
+                                                "hour (e.g. 7 = 7 AM)")
+    mixing_skip_when_dry: bool = Field(False, description="Skip a timed run when every zone is below the observe RH "
+                                                          "and no surface is at risk")
     energy_optimization: bool = Field(True, description="Skip circulation when every zone is below the observe "
                                                         "threshold and no surface is at risk")
     manual_override_minutes: float = Field(60, gt=0, le=24 * 60)

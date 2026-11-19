@@ -148,6 +148,94 @@ def _in_windows(windows: list[ScheduleWindow], hour: float) -> bool:
     return not windows or any(w.contains(hour) for w in windows)
 
 
+def _quiet(cs, hour: float) -> bool:
+    a, b = cs.mixing_quiet_start_hour, cs.mixing_quiet_end_hour
+    if a is None or b is None or a == b:
+        return False
+    return ScheduleWindow(start_hour=min(a, 23.99), end_hour=b).contains(hour % 24)
+
+
+def _schedule_allows(cs, hour: float) -> bool:
+    return _in_windows(cs.mixing_windows, hour % 24) and not _quiet(cs, hour)
+
+
+def schedule_status(cs, now: datetime, local_hour: float | None = None) -> dict:
+    """Where the timed on/off cycle is right now.
+
+    The cycle is anchored to local clock time (a 60/60 cycle runs on even hours), counted continuously across
+    midnight, so any on/off pair repeats evenly. Quiet hours and allowed windows suppress the ON part."""
+    if local_hour is None:
+        local_hour = now.hour + now.minute / 60
+    utc_min = now.hour * 60 + now.minute + now.second / 60
+    # offset of local time from `now`, rounded to the nearest 15 min (time zones)
+    offset = round(((local_hour * 60 - utc_min + 720) % 1440 - 720) / 15) * 15
+    on_m, off_m = cs.mixing_on_min, cs.mixing_off_min
+    period = on_m + off_m
+    t = now.timestamp() / 60 + offset
+    phase = t % period
+    in_on = phase < on_m
+    allowed = _schedule_allows(cs, local_hour)
+    quiet = _quiet(cs, local_hour)
+    running = bool(cs.periodic_mixing) and in_on and allowed
+    ends = None
+    if running:
+        left = on_m - phase
+        for i in range(1, int(math.ceil(left))):
+            if not _schedule_allows(cs, local_hour + i / 60):  # quiet hours begin partway through this run
+                left = i
+                break
+        ends = now + timedelta(minutes=left)
+    nxt = None
+    if cs.periodic_mixing and not running:
+        cands = []
+        if in_on and not allowed:
+            # inside an ON block but paused: the run resumes partway through a block when the pause ends
+            for i in range(1, int(on_m) + 1):
+                if phase + i >= on_m:
+                    break
+                if _schedule_allows(cs, local_hour + i / 60):
+                    cands.append(i)
+                    break
+        first = period - phase  # start of the next ON block
+        for i in range(int(2 * 1440 / period) + 2):
+            m = first + i * period
+            for j in range(0, int(on_m)):  # first allowed minute of that block
+                if _schedule_allows(cs, local_hour + (m + j) / 60):
+                    cands.append(m + j)
+                    break
+            else:
+                continue
+            break
+        if cands:
+            nxt = now + timedelta(minutes=min(cands))
+    return {"enabled": bool(cs.periodic_mixing), "on_min": on_m, "off_min": off_m, "running": running,
+            "quiet": quiet, "allowed": allowed, "ends": ends, "next_start": nxt}
+
+
+def _schedule_overview(cs, now: datetime, local_hour: float | None) -> dict:
+    sch = schedule_status(cs, now, local_hour)
+    return {"enabled": sch["enabled"], "on_min": sch["on_min"], "off_min": sch["off_min"],
+            "running": sch["running"], "quiet": sch["quiet"],
+            "ends": sch["ends"].isoformat() if sch["ends"] else None,
+            "next_start": sch["next_start"].isoformat() if sch["next_start"] else None,
+            "ends_label": _hm(sch["ends"], now, local_hour) or None,
+            "next_start_label": _hm(sch["next_start"], now, local_hour) or None,
+            "quiet_start_hour": cs.mixing_quiet_start_hour, "quiet_end_hour": cs.mixing_quiet_end_hour,
+            "fans": list(cs.mixing_fans)}
+
+
+def _hm(t: datetime | None, now: datetime, local_hour: float | None) -> str:
+    """Format a time in local clock time (`now` may be UTC; `local_hour` is local)."""
+    if t is None:
+        return ""
+    lh = local_hour if local_hour is not None else now.hour + now.minute / 60
+    m = (lh * 60 + (t - now).total_seconds() / 60) % 1440
+    h, mm = int(m // 60), int(round(m % 60))
+    if mm == 60:
+        h, mm = (h + 1) % 24, 0
+    return f"{(h % 12) or 12}:{mm:02d} {'AM' if h < 12 else 'PM'}"
+
+
 # ---------------------------------------------------------------- decision
 def decide_circulator(
     circ: Circulator, config: AppConfig, zones: dict, surfaces: list, state: CircState, now: datetime,
@@ -478,36 +566,42 @@ def decide_circulator(
     calm = all(z.air is None or z.air.rh * 100 < cs.observe_rh_pct for z in zones.values()) and \
         not any(s.risk in ("monitor", "elevated", "possible") for s in surfaces)
 
-    # 7. scheduled anti-stagnation mixing
+    # 7. timed cycling (scheduled anti-stagnation mixing)
+    sched_note = ""
     if cs.periodic_mixing and (not cs.mixing_fans or circ.id in cs.mixing_fans):
-        hour = local_hour if local_hour is not None else now.hour + now.minute / 60
-        if _in_windows(cs.mixing_windows, hour):
-            if cs.energy_optimization and calm:
-                reasons.append("ENERGY_OPTIMIZATION")
+        sch = schedule_status(cs, now, local_hour)
+        if sch["running"]:
+            if cs.mixing_skip_when_dry and calm:
+                reasons.append("SCHEDULED_RUN_SKIPPED_DRY")
+                sched_note = " Timed run skipped: every room is already dry."
             else:
-                period = cs.mixing_on_min + cs.mixing_off_min
-                phase = (hour * 60) % period
-                if phase < cs.mixing_on_min:
-                    return out(True, "SCHEDULED_MIXING",
-                               f"ON: scheduled mixing ({cs.mixing_on_min:.0f} min on, {cs.mixing_off_min:.0f} min off). "
-                               "Experimental; compare results on the History page.", "uncertain", preds=preds,
-                               immediate=True)
+                return out(True, "SCHEDULED_MIXING",
+                           f"ON: timed cycling ({cs.mixing_on_min:.0f} min on, {cs.mixing_off_min:.0f} min off), "
+                           f"until {_hm(sch['ends'], now, local_hour)}. Stirs the basement so damp corners and the "
+                           "air near the floor even out with the rest.", "uncertain", preds=preds, immediate=True)
+        elif sch["quiet"]:
+            reasons.append("SCHEDULED_QUIET_HOURS")
+            sched_note = (f" Timed cycling paused for quiet hours; next run "
+                          f"{_hm(sch['next_start'], now, local_hour)}." if sch["next_start"] else
+                          " Timed cycling paused for quiet hours.")
+        elif sch["next_start"]:
+            sched_note = f" Next timed run {_hm(sch['next_start'], now, local_hour)}."
 
     if unavailable and not preds:
         names = ", ".join(sorted({z for k in unavailable for z in (k.zone_a, k.zone_b)
                                   if not (zones.get(z) and zones[z].ok)}))
         reasons.append("ZONE_SENSOR_UNAVAILABLE")
         return out(False, "ZONE_SENSOR_UNAVAILABLE", f"OFF: no usable reading for {names}; humidity-based "
-                   "circulation for this connection is paused.", "uncertain", preds=preds)
+                   "circulation for this connection is paused." + sched_note, "uncertain", preds=preds)
     if waiting:
-        return out(False, "ZONE_DIFFERENCE_PENDING", "OFF for now: " + "; ".join(waiting) + ".", "none", preds=preds)
+        return out(False, "ZONE_DIFFERENCE_PENDING", "OFF for now: " + "; ".join(waiting) + "." + sched_note, "none", preds=preds)
     if notes:
-        return out(False, "NO_CLEAR_BENEFIT", "OFF: " + "; ".join(notes) + ".", "none", preds=preds)
+        return out(False, "NO_CLEAR_BENEFIT", "OFF: " + "; ".join(notes) + "." + sched_note, "none", preds=preds)
     if calm and cs.energy_optimization:
         return out(False, "ZONES_ACCEPTABLE", "OFF: every zone is below the observe threshold and no monitored "
-                   "surface is at risk.", "none", preds=preds)
+                   "surface is at risk." + sched_note, "none", preds=preds)
     return out(False, "NO_TRIGGER", "OFF: no zone has persistent high humidity or a reliable moisture difference that "
-               "mixing would improve.", "none", preds=preds)
+               "mixing would improve." + sched_note, "none", preds=preds)
 
 
 def runtime_today(intervals: list[tuple[datetime, datetime]], start: datetime, end: datetime) -> float:
@@ -545,7 +639,8 @@ _PRIORITY = ["WATER_INTRUSION_ALERT", "EQUIPMENT_FAULT", "SURFACE_MOISTURE_RISK"
 
 
 def overview(config: AppConfig, zones: dict, surfaces: list, decisions: dict, exterior: dict | None = None,
-             dehumidifier_running: bool | None = None, outdoor: AirState | None = None) -> dict:
+             dehumidifier_running: bool | None = None, outdoor: AirState | None = None,
+             now: datetime | None = None, local_hour: float | None = None) -> dict:
     """One resolved circulation mode plus the measurements behind it, for the dashboard and the log.
 
     The mode follows a fixed priority (safety, equipment, surface risk, dehumidifier, ventilation,
@@ -629,6 +724,7 @@ def overview(config: AppConfig, zones: dict, surfaces: list, decisions: dict, ex
         "concrete": concrete, "surface_risk": risk_level,
         "exhaust": {"on": bool(exterior.get("on")), "drying": bool(exterior.get("drying"))},
         "dehumidifier": dehum,
+        "schedule": _schedule_overview(cs, now, local_hour) if now is not None else None,
         "data_issues": issues,
         "note": "Circulation moves water between zones; it never removes it.",
     }

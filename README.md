@@ -257,7 +257,9 @@ Version 3 treats the basement as connected zones instead of one well-mixed room.
   4. Surface protection: mixing would bring lower-dew-point air to a surface at risk.
   5. Local humidity and beneficial mixing, triggered by persistent high RH or a moisture difference beyond sensor uncertainty. The fan runs only when the predicted RH drop in the target zone is worthwhile and does not just move the problem.
   6. Exterior-ventilation support, for assigned fans only, plus a short run afterwards.
-  7. Optional scheduled mixing (10 min on, 30 min off by default, experimental).
+  7. Optional timed cycling (Settings → Timed circulation cycling): a repeating on/off timer, e.g. 60 min on / 60 min
+     off, anchored to the clock, with optional quiet hours, a per-fan choice and an optional skip when every room is
+     already dry. Everything above it (safety, manual, condensation, probe checks) still wins.
   8. Energy optimization.
 
   Minimum on/off times and hysteresis apply.
