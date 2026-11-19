@@ -450,3 +450,12 @@
 /* concrete probe card in Rooms: same frame as a room, temperature instead of humidity */
 .h-slab .h-slab-note { display: block; font-size: 12px; line-height: 1.35; color: var(--text-2); }
 .h-slab .rm-meta { padding-bottom: 4px; }
+
+/* humidity at the slab: meter beside a 3-day chart */
+.h-slabrh { margin-top: 16px; }
+.h-slabrh-body { display: grid; grid-template-columns: 196px minmax(0, 1fr); gap: 18px; align-items: center; }
+.h-slabrh-body .h-gauge { width: 184px; max-width: 100%; margin: 0 auto; }
+.h-slabrh-chart { min-width: 0; }
+@media (max-width: 640px) {
+  .h-slabrh-body { grid-template-columns: minmax(0, 1fr); }
+}
