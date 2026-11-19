@@ -205,3 +205,21 @@ export function stats(vals: (number | null)[]) {
   v.forEach((x) => { if (x < min) min = x; if (x > max) max = x; sum += x; });
   return { min, max, mean: sum / v.length, last: v[v.length - 1], first: v[0] };
 }
+
+/* ---------- humidity right at the concrete slab ---------- */
+
+/** Saturation vapour pressure over water, hPa (Magnus). */
+const esat = (c: number) => 6.112 * Math.exp((17.62 * c) / (243.12 + c));
+
+/** Estimated RH at the slab surface (%): the basement air's moisture (its dew point) held at the slab's
+    temperature. Capped at 100; at or above 100 water can condense on the slab. */
+export function slabRh(slabC: number | null | undefined, dewC: number | null | undefined): number | null {
+  if (slabC == null || dewC == null || Number.isNaN(slabC) || Number.isNaN(dewC)) return null;
+  return Math.min(100, (100 * esat(dewC)) / esat(slabC));
+}
+
+export const SLAB_RH = { safe: 70, mold: 80 };
+
+export function slabTone(v: number | null): Tone {
+  return v == null ? "idle" : v < SLAB_RH.safe ? "good" : v < SLAB_RH.mold ? "warn" : "bad";
+}

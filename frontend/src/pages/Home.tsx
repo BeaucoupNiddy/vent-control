@@ -6,12 +6,13 @@ import { ReactNode, useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { exhaustState, plugOn } from "../fanstate";
 import { temp, tempVal, useUnit } from "../units";
+import { TimeChart } from "../components";
 import { ComfortDonut, ClimateChart, DailyBars, DryingChart, Gauge, MiniBars, Ring, Seg, Sparkline } from "./home/charts";
 import { CIRC_MODES, CircFanCard, DehumCard, ExhaustFanCard, FanOrb, ModeControl, modeLabel } from "./home/controls";
 import { EquipmentList, WallMeter, devices } from "./home/equipment";
 import { HIcon } from "./home/icons";
 import {
-  DEFAULT_TARGETS, HEADLINE, LEVEL_WORD, Pt, Targets, Tone, bands, cToF, dDeg, daily, feelWord, hourLabel, isDaytime,
+  DEFAULT_TARGETS, HEADLINE, SLAB_RH, slabRh, slabTone, LEVEL_WORD, Pt, Targets, Tone, bands, cToF, dDeg, daily, feelWord, hourLabel, isDaytime,
   r0, rhTone, since, timeUntil, toPts, trendDir, withLive,
 } from "./home/util";
 import "./home.css";
@@ -286,6 +287,9 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
           viz={<div className="t-ring"><Ring share={under24} tone={under24 == null ? "idle" : under24 > 0.8 ? "good" : under24 > 0.4 ? "warn" : "bad"} /></div>} />
       </div>
 
+      {/* humidity right at the concrete slab */}
+      <SlabHumidity surfaces={surfaces} dewC={main ? main.dew_point_c : null} pts={week ? since(week, 72) : []} avg={!!avg} />
+
       <nav className="h-jump" aria-label="Jump to section">
         {JUMPS.map(([id, l]) => <button key={id} onClick={() => jump(id)}>{l}</button>)}
       </nav>
@@ -471,6 +475,43 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
         <button className="h-more" onClick={() => openTab("Dashboard")}>Every detail on the Dashboard <HIcon name="arrow" size={16} /></button>
       </div>
     </div>
+  );
+}
+
+/* ---------- slab surface humidity: meter + 3-day chart ---------- */
+
+function SlabHumidity({ surfaces, dewC, pts, avg }: { surfaces: Json[]; dewC: number | null; pts: Pt[]; avg: boolean }) {
+  const live = surfaces.filter((x) => x.status === "ok" && x.t_c != null);
+  if (!surfaces.length) return null;
+  const slabC: number | null = live.length ? Math.min.apply(null, live.map((x) => x.t_c)) : null;
+  const v = slabRh(slabC, dewC);
+  const tone = slabTone(v);
+  const rows = pts.map((p) => ({ x: p.x, on: p.on, srh: slabRh(p.slab_t, p.avg_td != null ? p.avg_td : p.in_td) }));
+  const vals = rows.map((r) => r.srh).filter((x): x is number => x != null);
+  const have = vals.length;
+  const lo = have ? Math.max(0, Math.min(60, Math.floor(Math.min.apply(null, vals) / 10) * 10)) : 0;
+  const days = rows.length > 1 ? (rows[rows.length - 1].x - rows[0].x) / 864e5 : 1;
+  const xf = (x: number) => new Date(x).toLocaleString(undefined, days > 1.5 ? { weekday: "short", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
+  const word = v == null ? "No reading" : v < SLAB_RH.safe ? "Dry enough" : v < SLAB_RH.mold ? "Mold possible over time" : v >= 99.5 ? "Condensing" : "Mold risk";
+  const dw = avg ? "whole-basement" : "basement";
+  return (
+    <Panel icon="wall" title="Humidity at the slab" className="h-slabrh"
+      sub={`Slab temperature with the ${dw} dew point`}
+      right={<span className={`h-chip ${tone === "good" ? "good" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : "subtle"}`}>{word}</span>}>
+      <div className="h-slabrh-body">
+        <Gauge value={v} t={{ target: SLAB_RH.safe, upper: SLAB_RH.safe, high: SLAB_RH.mold } as Targets} tone={tone} label="at the slab" />
+        <div className="h-slabrh-chart">
+          {have < 2 ? <div className="h-chart-empty">The chart fills in as the slab probe reports.</div> : (
+            <TimeChart title="" unit="%" digits={0} data={rows} xFormat={xf} height={190} hideLegend
+              series={[{ key: "srh", name: "At the slab", color: "var(--series-4)" }]}
+              band={{ y1: 0, y2: SLAB_RH.safe, label: `Dry enough (under ${SLAB_RH.safe}%)` }}
+              lines={[{ y: SLAB_RH.safe, label: `${SLAB_RH.safe}% mold possible`, tone: "warn" }, { y: SLAB_RH.mold, label: `${SLAB_RH.mold}% mold risk`, tone: "crit" }]}
+              yDomain={[lo, 100]} />
+          )}
+          <p className="h-hint">Under {SLAB_RH.safe}% is dry enough. {SLAB_RH.safe}–{SLAB_RH.mold}% lets mold grow over weeks. Over {SLAB_RH.mold}% is a mold risk, and at 100% water forms on the slab. Last 3 days.</p>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
