@@ -447,3 +447,6 @@
 /* dehumidifier card icon, sized like the fan orbs */
 .h-fancard .fc-dehum { width: 46px; height: 46px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; background: var(--h-idle-bg, rgba(127, 127, 127, 0.12)); color: inherit; }
 .h-fancard.on .fc-dehum { background: rgba(52, 168, 110, 0.18); color: #2e9a63; }
+/* concrete probe card in Rooms: same frame as a room, temperature instead of humidity */
+.h-slab .h-slab-note { display: block; font-size: 12px; line-height: 1.35; color: var(--text-2); }
+.h-slab .rm-meta { padding-bottom: 4px; }

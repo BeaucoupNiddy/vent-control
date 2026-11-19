@@ -29,6 +29,8 @@ So the update path is: a change is merged on GitHub, and within about 30 minutes
 
 Set the Mac to never sleep and to restart after a power failure (System Settings, Energy).
 
+If the dashboard still shows problems a few minutes after a network or power outage (for example "cannot confirm the fan switch state"), press **Restart app** in Settings, or run `launchctl kickstart -k gui/$(id -u)/com.ventctl` in Terminal. The sensors and plugs reconnect on their own; a restart only clears what the app was holding, such as the 30-minute fan lockout after failed plug commands.
+
 ### macOS (by hand)
 
 ```bash

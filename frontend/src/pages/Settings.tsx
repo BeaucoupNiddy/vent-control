@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { api, Json } from "../api";
 import { Card } from "../components";
 import { ZoneSettings } from "./SettingsZones";
-import { UpdateCard } from "./SettingsUpdate";
+import { RestartCard, UpdateCard } from "./SettingsUpdate";
 import { DataResetCard } from "./SettingsData";
 import { DehumPlug } from "./SettingsDehum";
 
@@ -270,6 +270,7 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
           The controller never changes safety limits on its own.</p>
       </Card>
       <UpdateCard />
+      <RestartCard />
       <DataResetCard />
       <Hardware cfg={cfg} change={change} />
       <Groups cfg={cfg} change={change} />

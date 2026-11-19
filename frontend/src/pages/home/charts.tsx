@@ -127,7 +127,11 @@ export function ClimateChart({ pts, u, t, range, setRange, loading, nowX }: {
     in_rh: p.in_rh, avg_rh: p.avg_rh, out_rh: p.out_rh,
     in_td: tempVal(p.in_td, u), avg_td: tempVal(p.avg_td, u), out_td: tempVal(p.out_td, u),
     in_t: tempVal(p.in_t, u), avg_t: tempVal(p.avg_t, u), out_t: tempVal(p.out_t, u),
+    slab_t: tempVal(p.slab_t, u), slab_td: tempVal(p.slab_t, u),
   }));
+  // The concrete probe is its own line, never part of the basement average. On the dew point chart it is the
+  // condensation line: water can form on the slab when the air's dew point reaches it.
+  const hasSlab = metric !== "rh" && rows.some((r) => r.slab_t != null);
   const showAvg = rows.some((r) => r.avg_rh != null && r.in_rh != null && Math.abs(r.avg_rh - r.in_rh) > 0.5);
   const days = rows.length > 1 ? (rows[rows.length - 1].x - rows[0].x) / 864e5 : 1;
   const xf = (x: number) => new Date(x).toLocaleString(undefined, days > 1.5 ? { weekday: "short", hour: "numeric" } : { hour: "numeric", minute: "2-digit" });
@@ -136,6 +140,7 @@ export function ClimateChart({ pts, u, t, range, setRange, loading, nowX }: {
     { key: key("in"), name: showAvg ? "Most humid area" : "Basement", color: "var(--series-1)" },
     ...(showAvg ? [{ key: key("avg"), name: "Whole basement", color: "var(--series-3)", dashed: true }] : []),
     { key: key("out"), name: "Outside", color: "var(--series-2)" },
+    ...(hasSlab ? [{ key: key("slab"), name: metric === "td" ? "Concrete slab (condenses below)" : "Concrete slab", color: "var(--series-4)" }] : []),
   ];
   const mainKey = showAvg ? key("avg") : key("in");
   const st = stats(rows.map((r) => (r as Json)[mainKey]));
@@ -180,7 +185,9 @@ export function DryingChart({ pts, forecast, basementDpC, u, onF }: {
   const rows: Json[] = pts.map((p) => ({ x: p.x, on: p.on, gap: conv(p.gapF), fc: null }));
   const nowX = rows.length ? rows[rows.length - 1].x : Date.now();
   if (rows.length && basementDpC != null && forecast.length) {
-    rows[rows.length - 1].fc = rows[rows.length - 1].gap;
+    // start the forecast from the latest reading (the live row at "now" carries none)
+    const lastReal = [...rows].reverse().find((r) => r.gap != null);
+    rows[rows.length - 1].fc = lastReal && nowX - lastReal.x < 15 * 60000 ? lastReal.gap : rows[rows.length - 1].gap;
     forecast.forEach((h) => {
       const x = new Date(h.ts).getTime();
       if (x > nowX && h.dew_point_c != null) rows.push({ x, on: false, gap: null, fc: conv(((basementDpC - h.dew_point_c) * 9) / 5) });
@@ -205,6 +212,13 @@ export function DryingChart({ pts, forecast, basementDpC, u, onF }: {
     ["hGapFillF", split(fcV, true), true], ["hGapLineF", split(fcV, false), false],
   ];
   const fan = fanIntervals(rows.filter((r) => r.gap != null) as { x: number; on: boolean }[]);
+  // A reading with gaps on both sides (e.g. right after an outage) has no line to sit on: show it as a dot.
+  const lone = (p: { cx?: number; cy?: number; index?: number }) => {
+    const i = p.index ?? -1;
+    const isLone = i >= 0 && rows[i].gap != null && rows[i - 1]?.gap == null && rows[i + 1]?.gap == null;
+    if (!isLone || p.cx == null || p.cy == null) return <g key={`d${i}`} />;
+    return <circle key={`d${i}`} cx={p.cx} cy={p.cy} r={3} fill={rows[i].gap >= 0 ? "var(--h-green)" : "var(--h-amber)"} />;
+  };
   const xf = (x: number) => new Date(x).toLocaleTimeString(undefined, { hour: "numeric" });
   const U = `°${u}`;
   return (
@@ -243,7 +257,7 @@ export function DryingChart({ pts, forecast, basementDpC, u, onF }: {
           );
         }} />
         <Area dataKey="gap" type="monotone" stroke="url(#hGapLineP)" strokeWidth={2} fill="url(#hGapFillP)" baseValue={0}
-          isAnimationActive={false} connectNulls={false} dot={false} activeDot={{ r: 4, stroke: "var(--surface)", strokeWidth: 2 }} />
+          isAnimationActive={false} connectNulls={false} dot={lone} activeDot={{ r: 4, stroke: "var(--surface)", strokeWidth: 2 }} />
         <Area dataKey="fc" type="monotone" stroke="url(#hGapLineF)" strokeWidth={2} strokeDasharray="5 4" fill="url(#hGapFillF)" fillOpacity={0.6}
           baseValue={0} isAnimationActive={false} connectNulls={false} dot={false} activeDot={{ r: 4, stroke: "var(--surface)", strokeWidth: 2 }} />
       </AreaChart>

@@ -44,7 +44,7 @@ from . import calibration, circulation, tamo, thermal
 from . import dehumidifier as dehum_mod
 from . import surfaces as surf_mod
 from . import zones as zones_mod
-from .config import AppConfig, ControlPolicy, FanGroup, Mode, SensorRole
+from .config import AppConfig, ControlPolicy, FanGroup, Mode, SensorMapping, SensorRole
 from .engine import Decision, GroupState, decide, group_fans
 from .forecast import ForecastCache
 from .hardware.base import HardwareError, SensorSource, SwitchController, SwitchStatus
@@ -131,6 +131,7 @@ class Controller:
     previous_mode: Mode = Mode.AUTO
     _prev_ts: dict[str, datetime] = field(default_factory=dict)
     _last_readings: dict[str, SensorReading] = field(default_factory=dict)
+    _temp_only: dict[str, int] = field(default_factory=dict)  # sensor id -> consecutive readings with no humidity
     _gateway_error: str | None = None
     _rh_above: dict[str, datetime | None] = field(default_factory=dict)
     _cycle_times: list[datetime] = field(default_factory=list)
@@ -260,6 +261,7 @@ class Controller:
         # reading per sensor, and validation will age it out to "stale".
         for r in readings:
             self._last_readings[r.sensor_id] = r
+        self._adopt_probes(readings, now)
 
         stale_s = cfg.sensors.stale_minutes * 60
         snap = Snapshot(now)
@@ -561,6 +563,43 @@ class Controller:
         self.storage.save_config(self.config)
         self.storage.add_event(self.clock.now(), "config", "warning", f"Circulation automation changed from {old} to "
                                f"{mode}", "CIRCULATION_MODE", {"by": who, "from": old, "to": mode})
+
+    # temperature-only gateway channels (WN30 / WN30BL / WN34 probes)
+    PROBE_STREAK = 3  # readings in a row with temperature and no humidity before a channel counts as a probe
+
+    def _adopt_probes(self, readings: list[SensorReading], now: datetime) -> None:
+        """A WN30BL concrete probe shares the gateway's channel pool with the WN31 room sensors but reports
+        temperature only. Use it as a surface probe on its own: add a mapping for an unmapped one, and move one
+        that was set up as a basement sensor (where it can never validate, since it has no humidity) to the
+        surface role. It never joins the room averages."""
+        changed = []
+        for r in readings:
+            sid = r.sensor_id
+            if not (sid.startswith("ecowitt:ch") or sid.startswith("ecowitt:tf")) or r.temp_c is None:
+                continue
+            if r.rh_pct is not None:
+                self._temp_only[sid] = -1  # has reported humidity: a room sensor, never a probe
+                continue
+            if self._temp_only.get(sid, 0) < 0:
+                continue
+            self._temp_only[sid] = self._temp_only.get(sid, 0) + 1
+            if self._temp_only[sid] < self.PROBE_STREAK:
+                continue
+            m = next((m for m in self.config.sensors.mappings if m.sensor_id == sid), None)
+            if m is None:
+                n = sum(1 for x in self.config.sensors.mappings if x.role == SensorRole.SURFACE)
+                name = "Concrete slab probe" + (f" {n + 1}" if n else "")
+                self.config.sensors.mappings.append(SensorMapping(sensor_id=sid, name=name, role=SensorRole.SURFACE))
+                changed.append((sid, name, "added as a surface probe"))
+            elif m.role == SensorRole.BASEMENT:
+                m.role = SensorRole.SURFACE
+                changed.append((sid, m.name, "moved from basement air to surface probe (it reports no humidity)"))
+        if changed:
+            self.storage.save_config(self.config)
+            for sid, name, what in changed:
+                self.storage.add_event(now, "config", "info", f"{name} ({sid}) {what}. It is shown on its own and "
+                                       "used for the condensation checks, not in the room averages.",
+                                       "PROBE_ADOPTED", {"sensor_id": sid})
 
     # sensor side-by-side comparison (commissioning)
     def _pause_for_comparison(self, cond) -> None:
