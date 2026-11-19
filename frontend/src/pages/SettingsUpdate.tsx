@@ -81,3 +81,53 @@ export function UpdateCard() {
     </Card>
   );
 }
+
+/** Settings card: restarts the app, e.g. after a network outage left the fans locked out. */
+export function RestartCard() {
+  const [info, setInfo] = useState<Json>(null);
+  const [phase, setPhase] = useState<"idle" | "restarting" | "done">("idle");
+  const [err, setErr] = useState("");
+
+  useEffect(() => { api.restartInfo().then(setInfo).catch(() => setInfo(null)); }, []);
+
+  async function restartNow() {
+    if (!window.confirm("Restart the app now? The dashboard will be unavailable for a few seconds.")) return;
+    setErr("");
+    try {
+      await api.restartNow();
+    } catch (e) {
+      setErr(String((e as Error).message));
+      return;
+    }
+    setPhase("restarting");
+    // wait for the old process to stop, then for the new one to answer
+    await new Promise((r) => window.setTimeout(r, 3000));
+    for (let i = 0; i < 40; i++) {
+      try {
+        await api.restartInfo();
+        setPhase("done");
+        return;
+      } catch {
+        await new Promise((r) => window.setTimeout(r, 1500));
+      }
+    }
+    setPhase("idle");
+    setErr("The app hasn't come back yet. Check data/ventctl.log on the Mac.");
+  }
+
+  return (
+    <Card title="Restart app" right={
+      <button className="btn" disabled={!info?.available || phase === "restarting"} onClick={restartNow}>
+        {phase === "restarting" ? "Restarting…" : "Restart app"}
+      </button>}>
+      <p className="note">
+        Use this if the dashboard still shows problems a few minutes after a network or power outage, such as
+        "cannot confirm the fan switch state". On restart the app reads every sensor and plug again. If an
+        automatic drying cycle is running it carries on; otherwise running fans are switched off first.
+      </p>
+      {info && !info.available && <p className="error">{info.reason}</p>}
+      {phase === "done" && <p>Restarted. Everything was read again.</p>}
+      {err && <p className="error">{err}</p>}
+    </Card>
+  );
+}

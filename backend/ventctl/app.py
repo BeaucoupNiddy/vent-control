@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from . import analysis, calibration, climate, explainer, reports, setup_guide, simulation, updater, weather
+from . import analysis, calibration, climate, explainer, reports, restart, setup_guide, simulation, updater, weather
 from .clock import AcceleratedClock, Clock, ManualClock
 from .config import AppConfig, ControlPolicy, Mode, ShellyDevice, example_config
 from .controller import Controller
@@ -246,6 +246,19 @@ def create_app(db_path: str | None = None, demo_speed: float | None = None, back
             return updater.start()
         except RuntimeError as e:
             raise HTTPException(409, str(e))
+
+    @app.get("/api/restart")
+    def restart_info():
+        return restart.info()
+
+    @app.post("/api/restart")
+    def restart_now():
+        if not restart.info()["available"]:
+            raise HTTPException(409, restart.info()["reason"])
+        c = ctrl()
+        c.storage.add_event(c.clock.now(), "config", "info", "App restarted from the dashboard", "APP_RESTART")
+        stop = getattr(app.state, "restart_stop", None)  # tests replace the real stop
+        return restart.schedule(stop=stop) if stop else restart.schedule()
 
     @app.get("/api/status")
     def status():
