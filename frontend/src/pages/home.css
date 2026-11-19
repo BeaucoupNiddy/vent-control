@@ -443,3 +443,7 @@
   .h-rooms { grid-template-columns: minmax(0, 1fr); }
   .h-panel-head > .h-seg { width: 100%; }
 }
+
+/* concrete probe card in Rooms: same frame as a room, temperature instead of humidity */
+.h-slab .h-slab-note { display: block; font-size: 12px; line-height: 1.35; color: var(--text-2); }
+.h-slab .rm-meta { padding-bottom: 4px; }

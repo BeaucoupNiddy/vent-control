@@ -417,7 +417,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
       )}
 
       {/* ================= ROOMS ================= */}
-      {zones.length > 0 && (
+      {(zones.length > 0 || surfaces.length > 0) && (
         <>
           <SectionTitle id="rooms" title="Rooms" sub={multiZone ? `${zones.length} areas · the fans watch the most humid one` : undefined} />
           <div className="h-rooms">
@@ -429,6 +429,9 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
               <RoomCard key={z.id} name={z.name} note={z.on_ventilation_path ? "On the fans' air path" : "Off the main air path"} rh={z.rh_pct}
                 tC={z.t_c} dpC={z.dew_point_c} level={z.level} trend={z.trend && z.trend.rh_pct_h} t={targets} u={u}
                 stale={z.status !== "ok"} spark={day.map((p) => (p.zones[z.id] != null ? p.zones[z.id] : null))} />
+            ))}
+            {surfaces.map((sf) => (
+              <SlabCard key={sf.sensor_id} s={sf} u={u} spark={surfaces.length === 1 ? day.map((p) => tempVal(p.slab_t, u)) : []} />
             ))}
           </div>
         </>
@@ -459,6 +462,39 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
         <button className="h-more" onClick={() => openTab("Ask")}><HIcon name="spark" size={16} /> Ask why the fans are doing this</button>
         <button className="h-more" onClick={() => openTab("Dashboard")}>Every detail on the Dashboard <HIcon name="arrow" size={16} /></button>
       </div>
+    </div>
+  );
+}
+
+/* ---------- the concrete probe: its own card, never part of the room average ---------- */
+
+const SLAB_WORD: Record<string, string> = { lower: "Safe", monitor: "Watch", elevated: "Damp risk", possible: "May condense" };
+
+function SlabCard({ s, u, spark }: { s: Json; u: "F" | "C"; spark: (number | null)[] }) {
+  const ok = s.status === "ok" && s.t_c != null;
+  const margin: number | null = s.margin_f;
+  const tone: Tone = !ok ? "idle" : s.risk === "lower" ? "good" : s.risk === "monitor" ? "ok" : s.risk === "elevated" ? "warn" : "bad";
+  const chip = tone === "good" ? "good" : tone === "warn" ? "warn" : tone === "bad" ? "bad" : "subtle";
+  const air = s.local_source === "zone" && s.zone_name ? s.zone_name : "the most humid room";
+  return (
+    <div className={`h-room h-slab tone-${tone}`}>
+      <div className="rm-top">
+        <div>
+          <strong>{s.name}</strong>
+          <small>Concrete probe · not in the room average</small>
+        </div>
+        <span className={`h-chip ${chip}`}>{!ok ? "No reading" : SLAB_WORD[s.risk] || s.risk_label || "OK"}</span>
+      </div>
+      <div className="rm-mid">
+        <span className="rm-rh">{ok ? temp(s.t_c, u, 0) : "—"}</span>
+        <div className="rm-meta">
+          <span>{s.local_dew_point_c != null ? `Air dew point ${temp(s.local_dew_point_c, u, 0)}` : "No air reading to compare"}</span>
+          {ok && margin != null && <span>{margin >= 0 ? `${dDeg(margin, u, false)} above it` : `${dDeg(-margin, u, false)} below it`}</span>}
+          {ok && s.surface_rh_pct != null && <span>Surface RH {Math.round(s.surface_rh_pct)}%</span>}
+        </div>
+      </div>
+      <small className="h-slab-note">{ok ? `Compared with ${air}. Water can form on the slab if the air's dew point reaches its temperature.` : s.message || "Waiting for the probe to report."}</small>
+      {spark.length > 0 && <Sparkline values={spark} tone={tone} height={34} />}
     </div>
   );
 }
