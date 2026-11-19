@@ -237,7 +237,8 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
   useEffect(() => { api.config().then(setCfg); }, []);
   if (!cfg) return <Card>Loading…</Card>;
 
-  const change = (p: string, v: Json) => { setCfg(setIn(cfg, p, v)); setDirty(true); setOk(""); };
+  // functional update so several changes in one click (add a plug + assign it) all land
+  const change = (p: string, v: Json) => { setCfg((c: Json) => setIn(c, p, v)); setDirty(true); setOk(""); };
   const fanChange = (i: number, k: string, v: Json) => change(`fans.${i}.${k}`, v);
   const mapChange = (i: number, k: string, v: Json) => change(`sensors.mappings.${i}.${k}`, v);
 
@@ -265,6 +266,12 @@ export default function Settings({ onSaved }: { onSaved: () => void }) {
 
   return (
     <>
+      {dirty && (
+        <div className="save-float" role="region" aria-label="Unsaved changes">
+          <span>Unsaved changes</span>
+          {err && <span className="error">{err}</span>}
+          <button className="btn primary" onClick={save}>Save settings</button>
+        </div>)}
       <Card title="Settings" right={saveBar}>
         <p className="note">All values are validated before saving. Defaults are starting points, not universally optimal settings.
           The controller never changes safety limits on its own.</p>
