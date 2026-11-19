@@ -100,6 +100,22 @@ export function niceTicks(x0: number, x1: number): { ticks: number[]; fmt: (x: n
   return { ticks, fmt };
 }
 
+/** Y range with breathing room: pads the data by ~10% of its spread, then snaps out to round ticks,
+    so the highest and lowest readings never sit on (or get clipped by) the chart's edge. */
+export function niceY(values: number[]): { domain: [number, number]; ticks: number[] } | null {
+  if (!values.length) return null;
+  let lo = Math.min(...values), hi = Math.max(...values);
+  const pad = Math.max((hi - lo) * 0.1, 0.5);
+  lo -= pad; hi += pad;
+  const raw = (hi - lo) / 4;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const step = ([1, 2, 2.5, 5, 10].find((m) => m * mag >= raw) || 10) * mag;
+  const a = Math.floor(lo / step) * step, b = Math.ceil(hi / step) * step;
+  const ticks: number[] = [];
+  for (let v = a; v <= b + step / 2; v += step) ticks.push(Math.round(v * 1000) / 1000);
+  return { domain: [ticks[0], ticks[ticks.length - 1]], ticks };
+}
+
 export function TimeChart({
   data: rawData, series, unit, height = 220, fanOn, xFormat, zeroLine, yDomain, digits = 1, title, badge, band, lines, nowX, hideLegend,
 }: {
@@ -123,6 +139,12 @@ export function TimeChart({
     });
     return parts;
   });
+  const yVals: number[] = [];
+  if (!yDomain) {
+    rawData.forEach((r) => series.forEach((s) => { const v = r[s.key]; if (typeof v === "number" && isFinite(v)) yVals.push(v); }));
+    lines?.forEach((l) => yVals.push(l.y));
+  }
+  const yNice = yDomain ? null : niceY(yVals);
   const fmtGap = (ms: number) => (ms >= 2 * 3600000 ? `${Math.round(ms / 3600000)} h` : `${Math.round(ms / 60000)} min`);
   return (
     <div>
@@ -159,7 +181,8 @@ export function TimeChart({
             ticks={ticks.length >= 2 ? ticks : undefined} interval={ticks.length >= 2 ? "preserveStartEnd" : undefined}
             tick={{ fill: "var(--text-3)", fontSize: 11 }} axisLine={{ stroke: "var(--border)" }} tickLine={false} minTickGap={40} scale="time" />
           <YAxis tick={{ fill: "var(--text-3)", fontSize: 11 }} axisLine={false} tickLine={false} width={44}
-            domain={yDomain || ["auto", "auto"]} tickFormatter={(v) => `${Number(v).toFixed(digits >= 2 ? 1 : 0)}`} />
+            domain={yDomain || yNice?.domain || ["auto", "auto"]} ticks={yNice?.ticks} allowDataOverflow={false}
+            tickFormatter={(v) => { const n = Number(v); return Number.isInteger(n) || digits < 1 ? n.toFixed(digits >= 2 ? 1 : 0) : n.toFixed(1); }} />
           {zeroLine && <ReferenceLine y={0} stroke="var(--text-3)" strokeDasharray="3 3" />}
           {band && <ReferenceArea y1={band.y1} y2={band.y2} fill="var(--band-shade)" fillOpacity={1} stroke="none" ifOverflow="hidden" />}
           {lines?.map((l) => (

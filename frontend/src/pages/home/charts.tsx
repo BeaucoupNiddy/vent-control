@@ -159,7 +159,7 @@ export function ClimateChart({ pts, u, t, range, setRange, loading, nowX }: {
       {loading ? <div className="h-chart-empty">Loading…</div> : rows.length < 2 ? <div className="h-chart-empty">Not enough history yet. Check back in an hour.</div> : (
         <>
           <TimeChart title="" unit={unit} digits={metric === "rh" ? 0 : 1} data={rows} xFormat={xf} fanOn={fanIntervals(rows)}
-            height={260} series={series} lines={lines} band={band} nowX={nowX} yDomain={metric === "rh" ? ["dataMin - 4", "dataMax + 4"] : undefined} />
+            height={260} series={series} lines={lines} band={band} nowX={nowX} />
           {st && (
             <div className="h-chart-stats">
               <span><small>Now</small><strong>{fmt(st.last)}</strong></span>
