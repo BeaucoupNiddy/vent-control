@@ -343,6 +343,10 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
             <p className="h-hint">
               {circ.mode === "shadow" ? "Learning: the app works out when these would help but leaves the plugs alone. " : circ.mode === "auto" ? "Automatic: the app runs these when mixing helps, and alongside the exhaust fans. " : "Automation is off. "}
               On and Off here last one hour, then go back to Auto.
+              {circ.overview?.schedule?.enabled && (circ.overview.schedule.running
+                ? ` Timed cycling: running until ${circ.overview.schedule.ends_label}.`
+                : circ.overview.schedule.quiet ? ` Timed cycling: quiet hours${circ.overview.schedule.next_start_label ? `, next run ${circ.overview.schedule.next_start_label}` : ""}.`
+                : circ.overview.schedule.next_start_label ? ` Timed cycling: next run ${circ.overview.schedule.next_start_label}.` : "")}
               {circ.overview && circ.overview.concrete && circ.overview.concrete.state !== "ok" ? " No concrete probe reading yet, so surface-drying fans stay off in Automatic." : ""}
             </p>
           </Panel>

@@ -29,6 +29,7 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
   const zones: Json[] = cfg.zones || [];
   const conns: Json[] = cfg.connections || [];
   const circs: Json[] = cfg.circulators || [];
+  const mixFans: string[] = cfg.circulation?.mixing_fans || [];
   const zoneOpts = zones.map((z) => <option key={z.id} value={z.id}>{z.name}</option>);
   const plugs: string[] = [
     ...(cfg.switches.tapo_devices || []).map((d: Json) => d.switch_id),
@@ -102,7 +103,7 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
           The water-intrusion lockout (Safety interlocks) turns every fan off, including manual overrides.</p>
         <div className="table-wrap"><table>
           <thead><tr><th>Id</th><th>Name</th><th>Type</th><th>Job</th><th>Sits in zone</th><th>Location</th><th>Model</th><th>Smart plug</th><th>Speed set on fan</th><th>Watts</th>
-            <th>Ventilation support</th><th>Automatic allowed</th><th>Commissioned</th><th>Enabled</th><th /></tr></thead>
+            <th>Ventilation support</th><th>Timed cycling</th><th>Automatic allowed</th><th>Commissioned</th><th>Enabled</th><th /></tr></thead>
           <tbody>{circs.map((c, i) => (
             <tr key={i}>
               <td className="faint">{c.id}</td>
@@ -120,6 +121,12 @@ export function ZoneSettings({ cfg, change }: { cfg: Json; change: Change }) {
                 {["low", "medium", "high", "unknown"].map((s) => <option key={s}>{s}</option>)}</select></td>
               <td><input type="number" style={{ width: 60 }} value={c.rated_w} onChange={(e) => change(`circulators.${i}.rated_w`, num(e.target.value))} /></td>
               <td><input type="checkbox" checked={c.ventilation_support} onChange={(e) => change(`circulators.${i}.ventilation_support`, e.target.checked)} /></td>
+              <td><input type="checkbox" checked={!mixFans.length || mixFans.includes(c.id)} onChange={(e) => {
+                const cur: string[] = mixFans.length ? mixFans : circs.map((x) => x.id);
+                const next = e.target.checked ? [...cur.filter((x) => x !== c.id), c.id] : cur.filter((x) => x !== c.id);
+                // every fan chosen = the empty list (includes fans added later); none chosen keeps an impossible id
+                change("circulation.mixing_fans", circs.every((x) => next.includes(x.id)) ? [] : next.length ? next : ["none"]);
+              }} /></td>
               <td><input type="checkbox" checked={c.auto_enabled} onChange={(e) => change(`circulators.${i}.auto_enabled`, e.target.checked)} /></td>
               <td><input type="checkbox" checked={c.commissioned} onChange={(e) => change(`circulators.${i}.commissioned`, e.target.checked)} /></td>
               <td><input type="checkbox" checked={c.enabled} onChange={(e) => change(`circulators.${i}.enabled`, e.target.checked)} /></td>
