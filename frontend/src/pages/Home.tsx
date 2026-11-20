@@ -184,6 +184,12 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
   const gapAt = (h: Json) => (basementDpC != null && h.dew_point_c != null ? ((basementDpC - h.dew_point_c) * 9) / 5 : null);
   const goodHour = (h: Json) => { const x = gapAt(h); return x != null && x >= dpOnF; };
   const strip = fcHours.slice(0, 12);
+  // the forecast is shifted to match the outdoor sensor; say by how much (typical offset, °F differences)
+  const cal: Json | null = status.forecast && status.forecast.calibration ? status.forecast.calibration : null;
+  const sgn = (f: number) => { const v = u === "F" ? f : f / 1.8; return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(1)}°`; };
+  const fcCal = cal && cal.hours >= 6 && cal.typical_td_f != null
+    ? `Forecast adjusted to your outdoor sensor, which typically reads ${sgn(cal.typical_t_f)} temperature and ${sgn(cal.typical_td_f)} dew point vs the forecast service (last ${cal.hours >= 48 ? `${Math.round(cal.hours / 24)} days` : `${cal.hours} h`}).`
+    : null;
   const goodCount = fcHours.filter(goodHour).length;
   const nextGood = fcHours.filter(goodHour)[0];
   const indDpC: number | null = ind ? ind.dew_point_c : null;
@@ -413,7 +419,7 @@ export default function Home({ status, refresh, openTab }: { status: Json; refre
                   </div>
                 ))}
               </div>
-              <p className="h-hint"><span className="h-dot-inline" /> Green hours: forecast outside air is dry enough for the fans to help. Second number is the outside dew point.</p>
+              <p className="h-hint"><span className="h-dot-inline" /> Green hours: forecast outside air is dry enough for the fans to help. Second number is the outside dew point.{fcCal ? ` ${fcCal}` : ""}</p>
             </>
           ) : <p className="h-hint">No weather forecast available right now.</p>}
         </Panel>
