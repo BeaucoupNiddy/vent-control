@@ -281,6 +281,10 @@ class Controller:
 
         if self.forecast is not None:
             try:
+                if not self.forecast.seeded:
+                    self.forecast.seed(self.storage.history(now - timedelta(hours=72), now, 10**7))
+                if not self.comparison:  # outdoor sensor is indoors during a side-by-side comparison
+                    self.forecast.observe(now, self._outdoor_air)
                 await self.forecast.refresh(cfg, now)
             except Exception as e:  # never let a forecast problem affect control
                 log.warning("forecast refresh failed: %s", e)
