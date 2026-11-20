@@ -380,6 +380,31 @@ class Controller:
             verified = False
         return bool(info.confirmed), verified
 
+    def _adopt_circ_plug_state(self, c, now: datetime) -> None:
+        """Accept what a responding plug reports when it no longer matches the last command.
+
+        The plug's own auto-off timer, its button or the Tapo app can switch it without this app.
+        A plug that answers is reliable about its state, so take that as the new baseline instead
+        of treating the fan as unverified forever (which also blocked manual ON). A command that just
+        failed keeps its lockout first, so a plug that ignores commands is still reported.
+        """
+        info = self.switch_info.get(c.switch_id) if c.switch_id else None
+        if info is None or not info.reachable or info.confirmed is None or info.commanded is None:
+            return
+        if info.commanded == info.confirmed:
+            return
+        fail = self._command_failures.get(c.switch_id)
+        if fail and now < fail[1]:
+            return
+        self.storage.add_event(now, "circulation", "warning",
+                               f"{c.name}: its plug switched {'ON' if info.confirmed else 'OFF'} without this app "
+                               "(plug auto-off timer, button or Tapo app). Using the plug's reported state.",
+                               "CIRC_PLUG_STATE_ADOPTED",
+                               {"circulator": c.id, "switch": c.switch_id, "commanded": info.commanded,
+                                "confirmed_state": info.confirmed})
+        info.commanded = info.confirmed
+        self._command_failures.pop(c.switch_id, None)
+
     async def _circulate(self, now: datetime, local_hour: float) -> None:
         cfg = self.config
         cs = cfg.circulation
@@ -401,6 +426,7 @@ class Controller:
                 self.storage.add_event(now, "override", "info", f"{c.name}: manual override expired", "CIRC_MANUAL_EXPIRED",
                                        {"circulator": c.id})
             if not sim:
+                self._adopt_circ_plug_state(c, now)
                 actual, verified = self._circ_switch_verified(c.switch_id, now)
                 if actual != st.is_on:
                     st.last_change = now
@@ -942,7 +968,14 @@ class Controller:
             info = self.switch_info.get(f.switch_id)
             if f.enabled and info and info.reachable and info.confirmed and info.commanded:
                 await rearm(f.switch_id, now)
-        for sid in self._dehum_switch_ids():
+        # circulation fans and the dehumidifier plug run long too; without a re-arm the plug's own
+        # timer cuts them off after hardware_max_on_minutes
+        fan_sids = {f.switch_id for f in self.config.fans}
+        others = [c.switch_id for c in self.config.circulators if c.enabled and c.switch_id] + \
+            list(self._dehum_switch_ids())
+        for sid in dict.fromkeys(others):
+            if sid in fan_sids:
+                continue
             info = self.switch_info.get(sid)
             if info and info.reachable and info.confirmed and info.commanded:
                 await rearm(sid, now)
