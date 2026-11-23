@@ -17,8 +17,12 @@ mkdir -p "$HOME/Applications"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# Runs the repo's copy so updates reach it, or the copy bundled in the app if the
+# repo's is missing (for example while the checkout is on another branch).
+Q_SCRIPT="$(printf '%q' "$SCRIPT")"
+Q_BUNDLED="$(printf '%q' "$APP/Contents/Resources/open-dashboard.sh")"
+CMD="export VENTCTL_REPO=$(printf '%q' "$REPO"); if [ -f $Q_SCRIPT ]; then /bin/bash $Q_SCRIPT; else /bin/bash $Q_BUNDLED; fi"
 # AppleScript string literal for the shell command (escape \ and ").
-CMD="/bin/bash $(printf '%q' "$SCRIPT")"
 CMD_AS="${CMD//\\/\\\\}"
 CMD_AS="${CMD_AS//\"/\\\"}"
 cat > "$TMP/main.applescript" <<EOF
@@ -36,6 +40,7 @@ if [ -d "$APP" ]; then
     [ -f "$APP/Contents/Resources/$f" ] && cp "$APP/Contents/Resources/$f" "$TMP/$NAME.app/Contents/Resources/$f"
   done
 fi
+cp "$SCRIPT" "$TMP/$NAME.app/Contents/Resources/open-dashboard.sh"
 /usr/bin/codesign --force --deep -s - "$TMP/$NAME.app" >/dev/null 2>&1 || true
 
 rm -rf "$APP"

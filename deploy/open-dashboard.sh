@@ -6,7 +6,7 @@
 #   bash deploy/open-dashboard.sh
 
 set -uo pipefail
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="${VENTCTL_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 PORT="${VENTCTL_PORT:-8000}"
 URL="http://localhost:$PORT"
 LABEL="com.ventctl"
