@@ -102,8 +102,9 @@ def test_fan_not_responding_records_command_failure():
     assert faults and faults[0]["details"]["switch"] == "mock-plug-2"
     assert faults[0]["details"]["confirmed_state"] is False
     assert "COMMAND_FAILURE:mock-plug-2" in ctrl.alerts
-    # group cannot be verified -> engine forces OFF and the controller retries OFF
-    assert not ctrl.groups["main"].verified or ctrl.decisions["main"].reason_code == "SWITCH_UNVERIFIED"
+    # the broken fan is left out; the group stays under control and the working fan keeps running
+    assert ctrl.groups["main"].verified and world.switch_on["mock-plug-1"] is True
+    assert "FANS_DEGRADED:main" in ctrl.alerts
 
 
 def test_unreachable_switch_keeps_last_known_separate_from_verified():
@@ -114,9 +115,12 @@ def test_unreachable_switch_keeps_last_known_separate_from_verified():
     run_minutes(ctrl, clock, 1)
     info = ctrl.switch_info["mock-plug-1"]
     assert info.reachable is False and info.confirmed is True  # last known ON, not verified
-    assert ctrl.decisions["main"].reason_code == "SWITCH_UNVERIFIED"
-    assert "SWITCH_OFFLINE:mock-plug-1" in ctrl.alerts
-    assert world.switch_on["mock-plug-2"] is False  # reachable fan in the group was turned off
+    assert ctrl.decisions["main"].reason_code != "SWITCH_UNVERIFIED"
+    assert "SWITCH_OFFLINE:mock-plug-1" in ctrl.alerts and "FANS_DEGRADED:main" in ctrl.alerts
+    assert world.switch_on["mock-plug-2"] is True  # one dropped plug does not stop the other fan
+    world.switch_faults["mock-plug-2"] = "unreachable"
+    run_minutes(ctrl, clock, 1)
+    assert ctrl.decisions["main"].reason_code == "SWITCH_UNVERIFIED"  # no usable plug left: fail safe
 
 
 def test_manual_override_expires_and_is_logged():
