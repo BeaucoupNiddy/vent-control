@@ -136,6 +136,7 @@ class Controller:
     _rh_above: dict[str, datetime | None] = field(default_factory=dict)
     _cycle_times: list[datetime] = field(default_factory=list)
     _command_failures: dict[str, tuple] = field(default_factory=dict)
+    _offline_failures: set[str] = field(default_factory=set)  # failures caused by an unreachable plug
     dehum_status: SwitchStatus | None = None
     dehum_state: dehum_mod.DehumState = field(default_factory=dehum_mod.DehumState)
     dehum_override: dict | None = None  # {"state": "on" | "off", "until": iso | None}
@@ -296,7 +297,7 @@ class Controller:
         local = now.astimezone(ZoneInfo(cfg.system.timezone))
         local_hour = local.hour + local.minute / 60
         dcfg_all = self.decision_config()
-        dcfg = self._without_overridden_fans(dcfg_all)
+        dcfg = self._without_unavailable_fans(self._without_overridden_fans(dcfg_all))
         for g in cfg.groups:
             gs = self.groups.setdefault(g.id, GroupState())
             if cfg.mode != Mode.SIMULATION:
@@ -919,11 +920,16 @@ class Controller:
                 msg = res.error or f"device reports {'ON' if res.on else 'OFF'} after command"
                 self.storage.add_event(now, "fault", "critical",
                                        f"Command failure: {f.name} did not confirm "
-                                       f"{'ON' if d.target_on else 'OFF'} ({msg}). Automatic control of this "
-                                       f"group is locked out for {COMMAND_LOCKOUT_MIN} minutes.",
+                                       f"{'ON' if d.target_on else 'OFF'} ({msg}). This fan is left alone for up to "
+                                       f"{COMMAND_LOCKOUT_MIN} minutes (sooner if its plug answers again); "
+                                       f"the other fans keep running.",
                                        "COMMAND_FAILURE", details)
                 self._command_failures[f.switch_id] = (msg, now + timedelta(minutes=COMMAND_LOCKOUT_MIN),
                                                        d.target_on)
+                if not res.reachable:
+                    self._offline_failures.add(f.switch_id)
+                else:
+                    self._offline_failures.discard(f.switch_id)
         on, verified = self._group_switch_state(gid)  # fans following the group (not under a manual override)
         if on != gs.is_on:
             gs.last_change = now
@@ -1139,21 +1145,40 @@ class Controller:
             info.confirmed = st.on
             info.power_w = st.power_w
             info.last_ok = now
+            if st.switch_id in self._offline_failures:
+                # the failure was a dropped Wi-Fi link, not a faulty plug: retry now instead of waiting out the lockout
+                self._offline_failures.discard(st.switch_id)
+                if self._command_failures.pop(st.switch_id, None) is not None:
+                    self.storage.add_event(now, "fault", "info", f"Smart plug {st.switch_id} is answering again; "
+                                           "automatic control of it resumes", "SWITCH_RECONNECTED",
+                                           {"switch": st.switch_id})
         # unreachable: keep last confirmed value as "last known", but it is no longer verified
 
+    def _fan_usable(self, f, now: datetime) -> bool:
+        """The controller can switch this fan's plug and trust what it reports."""
+        i = self.switch_info.get(f.switch_id)
+        if i is None or not i.reachable or i.confirmed is None:
+            return False
+        fail = self._command_failures.get(f.switch_id)
+        if fail and now < fail[1]:
+            return False
+        # a commanded state the device did not confirm
+        return not (i.commanded is not None and i.commanded != i.confirmed)
+
     def _group_switch_state(self, gid: str) -> tuple[bool, bool]:
+        """(any fan ON, controllable). One plug dropping off Wi-Fi must not stop the others: the group stays
+        under control while at least one of its fans' plugs is usable. The unusable ones get their own alert."""
         fans = [f for f in self.config.fans if f.group == gid and f.enabled and f.id not in self.fan_overrides]
-        infos = [self.switch_info.get(f.switch_id) for f in fans]
-        verified = all(i is not None and i.reachable and i.confirmed is not None for i in infos)
-        on = any(i is not None and i.confirmed for i in infos)
         now = self.clock.now()
-        if any(f.switch_id in self._command_failures and now < self._command_failures[f.switch_id][1] for f in fans):
-            verified = False
-        # a commanded state the device did not confirm also makes the group unverified
-        if any(i is not None and i.commanded is not None and i.confirmed is not None and i.commanded != i.confirmed
-               for i in infos):
-            verified = False
+        usable = [f for f in fans if self._fan_usable(f, now)]
+        on = any((i := self.switch_info.get(f.switch_id)) is not None and i.confirmed for f in fans)
+        verified = bool(usable) or not fans
         return on, verified
+
+    def unavailable_fans(self, gid: str) -> list:
+        now = self.clock.now()
+        return [f for f in self.config.fans if f.group == gid and f.enabled and f.id not in self.fan_overrides
+                and not self._fan_usable(f, now)]
 
     # ------------------------------------------------------------ per-fan overrides
     def set_fan_override(self, fan_id: str, state: str, minutes: float | None = None, who: str = "user") -> None:
@@ -1195,6 +1220,22 @@ class Controller:
             return cfg
         return cfg.model_copy(update={"fans": [f.model_copy(update={"enabled": False}) if f.id in self.fan_overrides
                                                else f for f in cfg.fans]})
+
+    def _without_unavailable_fans(self, cfg: AppConfig) -> AppConfig:
+        """While some of a group's plugs are unreachable, decide (benefit, airflow, energy) with the fans that
+        can actually run. A group with no usable plug keeps its fans so the decision reports SWITCH_UNVERIFIED."""
+        if self.config.mode == Mode.SIMULATION:
+            return cfg
+        drop: set[str] = set()
+        for g in self.config.groups:
+            down = self.unavailable_fans(g.id)
+            following = [f for f in self.config.fans if f.group == g.id and f.enabled and f.id not in self.fan_overrides]
+            if down and len(down) < len(following):
+                drop.update(f.id for f in down)
+        if not drop:
+            return cfg
+        return cfg.model_copy(update={"fans": [f.model_copy(update={"enabled": False}) if f.id in drop else f
+                                               for f in cfg.fans]})
 
     def _forced_on_allowed(self, g: FanGroup, cond, cfg_all: AppConfig, now: datetime, local_hour: float,
                            tp) -> dict[str, tuple[bool, str]]:
@@ -1374,6 +1415,17 @@ class Controller:
                 self._set_alert(now, f"SENSOR_OFFLINE:{r.mapping.sensor_id}", bad, "critical", r.message)
                 self._set_alert(now, f"BATTERY_LOW:{r.mapping.sensor_id}", bool(r.battery_low), "warning",
                                 f"{r.mapping.name}: battery low")
+        if cfg.mode != Mode.SIMULATION:
+            for g in cfg.groups:
+                following = [f for f in cfg.fans if f.group == g.id and f.enabled and f.id not in self.fan_overrides]
+                down = self.unavailable_fans(g.id)
+                partial = bool(down) and len(down) < len(following)
+                self._set_alert(now, f"FANS_DEGRADED:{g.id}", partial, "warning",
+                                f"{g.name}: running on {len(following) - len(down)} of {len(following)} fans. "
+                                f"{', '.join(f.name for f in down)} "
+                                f"{'is' if len(down) == 1 else 'are'} not responding, so "
+                                f"{'it is' if len(down) == 1 else 'they are'} left out until "
+                                f"{'its plug answers' if len(down) == 1 else 'their plugs answer'} again.")
         for sid, info in self.switch_info.items():
             self._set_alert(now, f"SWITCH_OFFLINE:{sid}", not info.reachable, "critical",
                             f"Smart plug {sid} is not responding. Last known state: "
