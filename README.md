@@ -29,6 +29,10 @@ So the update path is: a change is merged on GitHub, and within about 30 minutes
 
 Set the Mac to never sleep and to restart after a power failure (System Settings, Energy).
 
+macOS only starts LaunchAgents once someone is logged in and past the lock screen. After a restart (including an overnight macOS update) the controller waits until you unlock the Mac, or until you click the Dock app below.
+
+**Dock app:** `bash deploy/make-launcher.sh` builds **Basement Vent** in `~/Applications` and adds it to the Dock. Clicking it starts the controller if it isn't answering, then opens the dashboard (as an app window in Brave if it's installed, otherwise in your default browser). The start-and-open logic lives in `deploy/open-dashboard.sh`, so updates reach it automatically.
+
 If the dashboard still shows problems a few minutes after a network or power outage (for example "cannot confirm the fan switch state"), press **Restart app** in Settings, or run `launchctl kickstart -k gui/$(id -u)/com.ventctl` in Terminal. The sensors and plugs reconnect on their own; a restart only clears what the app was holding, such as the 30-minute fan lockout after failed plug commands.
 
 ### macOS (by hand)
