@@ -328,7 +328,9 @@ class TemperatureSettings(BaseModel):
     min_dw_start_g_kg: float = Field(0.6, ge=0, le=10, description="Humidity-ratio advantage needed to start "
                                                                   "(basement minus inlet air)")
     min_dw_stop_g_kg: float = Field(0.25, ge=0, le=10, description="Fans stop below this humidity-ratio advantage")
-    utility_start_g_h: float = Field(150, ge=0, description="Net utility needed to start the fans")
+    utility_start_g_h: float = Field(50, ge=0, description="Net utility needed to start the fans (after the "
+                                                                 "switching cost; the drying benefit is already "
+                                                                 "scaled by humidity urgency)")
     utility_stop_g_h: float = Field(0, description="Fans stop when net utility falls below this")
     switch_cost_g_h: float = Field(25, ge=0, description="Small penalty for changing fan state")
     risk_weight_g_h: float = Field(200, ge=0, description="Soft penalty per °F² inside the condensation caution band")
@@ -609,7 +611,7 @@ def example_config() -> AppConfig:
 
 # Defaults that changed after installs existed. A saved configuration that still holds the old
 # default is moved to the new one once; a value the user changed is left alone.
-DEFAULTS_VERSION = 3
+DEFAULTS_VERSION = 4
 _DEFAULT_UPGRADES: list[tuple[int, str, str, float, float]] = [
     # (version, section, field, old default, new default)
     (1, "house", "moisture_buffer_kg", 25.0, 400.0),  # physics review: materials hold far more water than 25 kg
@@ -617,6 +619,10 @@ _DEFAULT_UPGRADES: list[tuple[int, str, str, float, float]] = [
     (2, "surfaces", "probe_uncertainty_f", 1.0, 2.0),  # Ecowitt WN30 manual: ±2°F
     (3, "circulation", "mixing_on_min", 10.0, 15.0),  # circulation spec: 15 min on, 45 min off
     (3, "circulation", "mixing_off_min", 30.0, 45.0),
+    # 150 was unreachable at moderate humidity: the benefit is already multiplied by urgency (about 0.3 at 65% RH),
+    # so 150 meant roughly 500-800 g/h of real drying. Replaying Nov 12-25 2026 measured data: 50 adds starts on
+    # real drying nights without short-cycling (5 starts in two weeks). The 0.6 g/kg gap still filters sensor noise.
+    (4, "temperature", "utility_start_g_h", 150.0, 50.0),
 ]
 
 

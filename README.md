@@ -192,7 +192,7 @@ risk     = weight × increase in max(0, 5 °F − predicted surface margin)²
 U        = smoothstep from 50 % RH (0) to 70 % RH (1)
 ```
 
-Profile multipliers: Maximum Drying 0.4, Balanced and Energy Saver 1, Temperature Preservation 2.5. Fans start at utility ≥ 150 and stop below 0. A humidity-ratio advantage is also needed: 0.6 g/kg to start, 0.25 g/kg to keep running. The weights are **heuristics**, labeled as such on the Dashboard. Water removed, predictions and HVAC cost are labeled estimated. Temperatures, RH and fan state are labeled measured.
+Profile multipliers: Maximum Drying 0.4, Balanced and Energy Saver 1, Temperature Preservation 2.5. Fans start at utility ≥ 50 (twice the switching cost; the drying benefit is already scaled by urgency, so a higher bar blocks useful drying at 60-70% RH) and stop below 0. A humidity-ratio advantage is also needed: 0.6 g/kg to start, 0.25 g/kg to keep running. The weights are **heuristics**, labeled as such on the Dashboard. Water removed, predictions and HVAC cost are labeled estimated. Temperatures, RH and fan state are labeled measured.
 
 ### Hard limits (both policies)
 
